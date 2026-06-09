@@ -37,25 +37,33 @@ def fetch_pr_diff(diff_url: str) -> str:
 
 def analyze_with_ai(pr_title: str, diff: str) -> dict:
     """调用 Claude 分析 PR diff，返回结构化 review"""
-    prompt = f"""You are an expert code reviewer. Analyze the following pull request and provide a structured review.
+    prompt = f"""You are a senior engineer doing a practical code review. Be direct and pragmatic — your goal is to help ship good code, not to find as many issues as possible.
 
 PR Title: {pr_title}
 
-Diff:
+Diff (only lines starting with + are new code):
 {diff}
 
-Respond with ONLY valid JSON in the following format (no markdown, no extra text):
-{{
-  "summary": "Brief summary of what this PR does",
-  "score": <1-10 quality score>,
-  "issues": [
-    {{"severity": "high|medium|low", "line": "filename:linenum or general", "comment": "specific issue description"}}
-  ],
-  "suggestions": ["improvement suggestion 1", "suggestion 2"],
-  "approved": <true if code is good enough to merge, false otherwise>
-}}
+Rules:
+- Only report issues you are CERTAIN about from the diff. Do NOT speculate about runtime behavior you cannot verify.
+- Only flag lines that are actually in the diff (new code added). Do not comment on existing unchanged code.
+- HIGH severity: real bugs, security vulnerabilities, data loss risks.
+- MEDIUM severity: clear logic errors or missing error handling that will likely cause problems.
+- LOW severity: only if it's a concrete maintainability issue, not just style preference.
+- If the code is clean and correct, return an empty issues array. It is perfectly fine to have 0 issues.
+- Suggestions should be actionable and specific. Max 3 suggestions.
+- Score 7-10 if code is solid. Only score below 5 if there are HIGH severity bugs.
 
-Focus on: correctness, performance, readability, and best practices. Be concise and actionable."""
+Respond with ONLY valid JSON (no markdown, no extra text):
+{{
+  "summary": "One sentence: what this PR does and overall quality assessment",
+  "score": <1-10>,
+  "issues": [
+    {{"severity": "high|medium|low", "line": "filename:linenum", "comment": "specific, certain issue"}}
+  ],
+  "suggestions": ["concrete suggestion 1", "concrete suggestion 2"],
+  "approved": <true if score >= 6, false otherwise>
+}}"""
 
     message = anthropic_client.messages.create(
         model="claude-haiku-4-5",
@@ -64,6 +72,11 @@ Focus on: correctness, performance, readability, and best practices. Be concise 
     )
 
     response_text = message.content[0].text.strip()
+    if response_text.startswith("```"):
+        response_text = response_text.split("```")[1]
+        if response_text.startswith("json"):
+            response_text = response_text[4:]
+    response_text = response_text.strip()
     return json.loads(response_text)
 
 
