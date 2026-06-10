@@ -1,2 +1,3 @@
 confluent-kafka==2.4.0
 python-dotenv==1.0.1
+# Note: smtplib, email, time are Python standard library modules (no install needed)
