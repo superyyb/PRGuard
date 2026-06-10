@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notifier
+  namespace: prguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notifier
+  template:
+    metadata:
+      labels:
+        app: notifier
+    spec:
+      containers:
+        - name: notifier
+          image: githubautomation-notifier:latest
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: prguard-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            - name: GMAIL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: prguard-secrets
+                  key: GMAIL_USER
+            - name: GMAIL_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: prguard-secrets
+                  key: GMAIL_APP_PASSWORD
+            - name: NOTIFY_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: prguard-secrets
+                  key: NOTIFY_EMAIL
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
