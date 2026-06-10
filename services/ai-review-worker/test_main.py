@@ -24,18 +24,18 @@ MOCK_EVENT = {
 }
 
 
-@patch("main.openai_client")
-def test_analyze_with_ai(mock_openai):
-    mock_choice = MagicMock()
-    mock_choice.message.content = json.dumps(MOCK_REVIEW)
-    mock_openai.chat.completions.create.return_value = MagicMock(choices=[mock_choice])
+@patch("main.anthropic_client")
+def test_analyze_with_ai(mock_anthropic):
+    mock_content = MagicMock()
+    mock_content.text = json.dumps(MOCK_REVIEW)
+    mock_anthropic.messages.create.return_value = MagicMock(content=[mock_content])
 
     result = analyze_with_ai("Add login endpoint", "diff content here")
 
     assert result["score"] == 7
     assert result["approved"] is False
     assert len(result["issues"]) == 1
-    mock_openai.chat.completions.create.assert_called_once()
+    mock_anthropic.messages.create.assert_called_once()
 
 
 @patch("main.producer")
