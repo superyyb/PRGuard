@@ -1,0 +1,50 @@
+name: CD
+
+# 触发条件：CI workflow 在 main 分支跑完之后
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+
+jobs:
+  build-and-push:
+    name: Build & Push ${{ matrix.service }}
+    # 只有 CI 通过才执行 CD，失败不部署
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write   # 允许推送到 GHCR
+
+    strategy:
+      matrix:
+        service:
+          - webhook-service
+          - ai-review-worker
+          - security-scanner
+          - result-service
+          - notifier
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # GitHub 自动提供，无需手动配置
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/prguard-${{ matrix.service }}:latest
+            ghcr.io/${{ github.repository_owner }}/prguard-${{ matrix.service }}:${{ github.event.workflow_run.head_sha }}
