@@ -61,25 +61,51 @@ def test_format_security_comment_passed():
     assert "✅ No issues found" in comment
 
 
+@patch("main.mark_ai_comment_posted")
+@patch("main.is_ai_comment_posted", return_value=False)
 @patch("main.save_ai_review", return_value=1)
 @patch("main.post_pr_comment")
-def test_handle_ai_result_posts_comment(mock_post, mock_save):
+def test_handle_ai_result_posts_comment(mock_post, mock_save, mock_check, mock_mark):
     handle_ai_result(AI_DATA)
     mock_post.assert_called_once()
     mock_save.assert_called_once()
+    mock_mark.assert_called_once()
     args = mock_post.call_args[0]
     assert args[0] == "owner/repo"
     assert args[1] == 10
     assert "AI Code Review" in args[2]
 
 
+@patch("main.mark_ai_comment_posted")
+@patch("main.is_ai_comment_posted", return_value=True)
+@patch("main.save_ai_review", return_value=1)
+@patch("main.post_pr_comment")
+def test_handle_ai_result_skips_duplicate(mock_post, mock_save, mock_check, mock_mark):
+    handle_ai_result(AI_DATA)
+    mock_post.assert_not_called()
+    mock_save.assert_not_called()
+
+
+@patch("main.mark_security_comment_posted")
+@patch("main.is_security_comment_posted", return_value=False)
 @patch("main.save_security_scan", return_value=1)
 @patch("main.post_pr_comment")
-def test_handle_security_result_posts_comment(mock_post, mock_save):
+def test_handle_security_result_posts_comment(mock_post, mock_save, mock_check, mock_mark):
     handle_security_result(SECURITY_DATA)
     mock_post.assert_called_once()
     mock_save.assert_called_once()
+    mock_mark.assert_called_once()
     args = mock_post.call_args[0]
     assert args[0] == "owner/repo"
     assert args[1] == 10
     assert "Security Scan" in args[2]
+
+
+@patch("main.mark_security_comment_posted")
+@patch("main.is_security_comment_posted", return_value=True)
+@patch("main.save_security_scan", return_value=1)
+@patch("main.post_pr_comment")
+def test_handle_security_result_skips_duplicate(mock_post, mock_save, mock_check, mock_mark):
+    handle_security_result(SECURITY_DATA)
+    mock_post.assert_not_called()
+    mock_save.assert_not_called()

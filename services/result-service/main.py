@@ -5,7 +5,15 @@ import threading
 from confluent_kafka import Consumer
 from dotenv import load_dotenv
 
-from database import init_db, save_ai_review, save_security_scan
+from database import (
+    init_db,
+    save_ai_review,
+    save_security_scan,
+    is_ai_comment_posted,
+    is_security_comment_posted,
+    mark_ai_comment_posted,
+    mark_security_comment_posted,
+)
 from github_client import (
     format_ai_comment,
     format_security_comment,
@@ -51,25 +59,39 @@ def consume_loop(topic: str, group_id: str, handler):
 def handle_ai_result(data: dict):
     pr_number = data["pr_number"]
     repo = data["repo_full_name"]
+    head_sha = data["head_sha"]
     review = data["review"]
 
-    print(f"[Result Service] Posting AI review for PR #{pr_number} in {repo}")
-    save_ai_review(repo, pr_number, data["head_sha"], review)
+    # 幂等性检查：comment 已发过则跳过
+    if is_ai_comment_posted(repo, pr_number, head_sha):
+        print(f"[Result Service] PR #{pr_number} ({head_sha[:7]}) already reviewed, skipping")
+        return
+
+    # 先存数据库，再发 comment
+    save_ai_review(repo, pr_number, head_sha, review)
     comment = format_ai_comment(review)
     post_pr_comment(repo, pr_number, comment)
+    mark_ai_comment_posted(repo, pr_number, head_sha)
     print(f"[Result Service] AI review posted and saved for PR #{pr_number}")
 
 
 def handle_security_result(data: dict):
     pr_number = data["pr_number"]
     repo = data["repo_full_name"]
+    head_sha = data["head_sha"]
     findings = data["findings"]
     passed = data["passed"]
 
-    print(f"[Result Service] Posting security scan for PR #{pr_number} in {repo}")
-    save_security_scan(repo, pr_number, data["head_sha"], findings, passed)
+    # 幂等性检查：comment 已发过则跳过
+    if is_security_comment_posted(repo, pr_number, head_sha):
+        print(f"[Result Service] PR #{pr_number} ({head_sha[:7]}) security scan already posted, skipping")
+        return
+
+    # 先存数据库，再发 comment
+    save_security_scan(repo, pr_number, head_sha, findings, passed)
     comment = format_security_comment(findings, passed)
     post_pr_comment(repo, pr_number, comment)
+    mark_security_comment_posted(repo, pr_number, head_sha)
     print(f"[Result Service] Security scan posted and saved for PR #{pr_number}")
 
 

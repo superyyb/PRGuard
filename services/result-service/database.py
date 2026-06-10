@@ -22,9 +22,12 @@ def init_db():
                     ai_score        INTEGER,
                     ai_approved     BOOLEAN,
                     ai_summary      TEXT,
+                    ai_comment_posted    BOOLEAN DEFAULT FALSE,
                     security_passed BOOLEAN,
                     security_findings_count INTEGER,
-                    created_at      TIMESTAMP DEFAULT NOW()
+                    security_comment_posted BOOLEAN DEFAULT FALSE,
+                    created_at      TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(repo_full_name, pr_number, head_sha)
                 );
             """)
             cur.execute("""
@@ -44,6 +47,52 @@ def init_db():
             """)
         conn.commit()
     print("[DB] Tables initialized")
+
+
+def is_ai_comment_posted(repo_full_name: str, pr_number: int, head_sha: str) -> bool:
+    """检查这个 commit 的 AI review comment 是否已经发过"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ai_comment_posted FROM pr_reviews
+                WHERE repo_full_name = %s AND pr_number = %s AND head_sha = %s
+            """, (repo_full_name, pr_number, head_sha))
+            row = cur.fetchone()
+            return row is not None and row["ai_comment_posted"] is True
+
+
+def is_security_comment_posted(repo_full_name: str, pr_number: int, head_sha: str) -> bool:
+    """检查这个 commit 的 Security comment 是否已经发过"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT security_comment_posted FROM pr_reviews
+                WHERE repo_full_name = %s AND pr_number = %s AND head_sha = %s
+            """, (repo_full_name, pr_number, head_sha))
+            row = cur.fetchone()
+            return row is not None and row["security_comment_posted"] is True
+
+
+def mark_ai_comment_posted(repo_full_name: str, pr_number: int, head_sha: str):
+    """标记 AI comment 已发送"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE pr_reviews SET ai_comment_posted = TRUE
+                WHERE repo_full_name = %s AND pr_number = %s AND head_sha = %s
+            """, (repo_full_name, pr_number, head_sha))
+        conn.commit()
+
+
+def mark_security_comment_posted(repo_full_name: str, pr_number: int, head_sha: str):
+    """标记 Security comment 已发送"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE pr_reviews SET security_comment_posted = TRUE
+                WHERE repo_full_name = %s AND pr_number = %s AND head_sha = %s
+            """, (repo_full_name, pr_number, head_sha))
+        conn.commit()
 
 
 def save_ai_review(repo_full_name: str, pr_number: int, head_sha: str, review: dict) -> int:
