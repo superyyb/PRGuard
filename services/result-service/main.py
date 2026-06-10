@@ -1,8 +1,10 @@
+import datetime
 import json
 import os
 import threading
+import time
 
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 
 from database import (
@@ -23,6 +25,63 @@ from github_client import (
 load_dotenv()
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+DLQ_TOPIC = "pr-events-dlq"
+
+# Lazy-initialized DLQ producer, shared across threads
+_dlq_producer = None
+_dlq_lock = threading.Lock()
+
+
+def get_dlq_producer() -> Producer:
+    global _dlq_producer
+    with _dlq_lock:
+        if _dlq_producer is None:
+            _dlq_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
+    return _dlq_producer
+
+
+def send_to_dlq(raw_message: str, error: str, error_type: str, attempts: int):
+    """把失败的消息发到 Dead Letter Queue，保留原始内容 + 错误信息。"""
+    producer = get_dlq_producer()
+    dlq_payload = json.dumps({
+        "original_message": raw_message,
+        "error": error,
+        "error_type": error_type,
+        "attempts": attempts,
+        "failed_at": datetime.datetime.utcnow().isoformat(),
+    })
+    producer.produce(DLQ_TOPIC, dlq_payload.encode("utf-8"))
+    producer.flush()
+    print(f"[Result Service] 📨 Sent to DLQ ({error_type}, {attempts} attempts): {error}")
+
+
+def process_with_retry(handler, data: dict, raw: str, max_retries: int = 3):
+    """
+    区分暂时失败和永久失败：
+    - KeyError / ValueError → 永久失败（消息结构错误），直接进 DLQ，不重试
+    - 其他 Exception      → 暂时失败（网络/API 超时），指数退避重试，耗尽后进 DLQ
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"[Result Service] Processing PR #{data.get('pr_number', '?')} "
+                  f"attempt {attempt}/{max_retries}")
+            handler(data)
+            print(f"[Result Service] ✅ PR #{data.get('pr_number', '?')} processed successfully")
+            return
+        except (KeyError, ValueError) as e:
+            # 永久失败：消息本身有问题，重试也没用
+            print(f"[Result Service] ❌ Permanent failure: {e}")
+            send_to_dlq(raw, str(e), "PermanentFailure", attempt)
+            return
+        except Exception as e:
+            if attempt < max_retries:
+                wait = 2 ** attempt  # 2s → 4s
+                print(f"[Result Service] ⚠️ Attempt {attempt} failed: {e}, "
+                      f"retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"[Result Service] ❌ All {max_retries} retries exhausted: {e}")
+                send_to_dlq(raw, str(e), "TemporaryFailure", attempt)
 
 
 def make_consumer(group_id: str) -> Consumer:
@@ -47,11 +106,17 @@ def consume_loop(topic: str, group_id: str, handler):
                 print(f"[Result Service] Consumer error: {msg.error()}")
                 continue
 
-            data = json.loads(msg.value().decode("utf-8"))
+            raw = msg.value().decode("utf-8")
+
+            # JSON 解析失败 = 永久失败，直接进 DLQ
             try:
-                handler(data)
-            except Exception as e:
-                print(f"[Result Service] Error handling message: {e}")
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                print(f"[Result Service] ❌ Invalid JSON: {e}")
+                send_to_dlq(raw, str(e), "PermanentFailure", 1)
+                continue
+
+            process_with_retry(handler, data, raw)
     finally:
         consumer.close()
 
