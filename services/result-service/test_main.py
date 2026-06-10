@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 from github_client import format_ai_comment, format_security_comment
-from main import handle_ai_result, handle_security_result
+from main import handle_ai_result, handle_security_result, process_with_retry
 
 
 AI_DATA = {
@@ -109,3 +109,47 @@ def test_handle_security_result_skips_duplicate(mock_post, mock_save, mock_check
     handle_security_result(SECURITY_DATA)
     mock_post.assert_not_called()
     mock_save.assert_not_called()
+
+
+# ── DLQ / retry tests ────────────────────────────────────────────────────────
+
+@patch("main.send_to_dlq")
+def test_process_with_retry_success(mock_dlq):
+    """Handler 成功 → 不发 DLQ"""
+    handler = MagicMock()
+    process_with_retry(handler, AI_DATA, "{}")
+    handler.assert_called_once()
+    mock_dlq.assert_not_called()
+
+
+@patch("main.send_to_dlq")
+def test_process_with_retry_permanent_failure(mock_dlq):
+    """KeyError → 永久失败，只尝试一次，直接进 DLQ"""
+    handler = MagicMock(side_effect=KeyError("pr_number"))
+    process_with_retry(handler, AI_DATA, "{}")
+    handler.assert_called_once()          # 不重试
+    mock_dlq.assert_called_once()
+    assert mock_dlq.call_args[0][2] == "PermanentFailure"
+
+
+@patch("main.time.sleep")
+@patch("main.send_to_dlq")
+def test_process_with_retry_exhausted(mock_dlq, mock_sleep):
+    """Exception 重试 3 次后仍失败 → 进 DLQ"""
+    handler = MagicMock(side_effect=Exception("GitHub API timeout"))
+    process_with_retry(handler, AI_DATA, "{}")
+    assert handler.call_count == 3        # 重试了 3 次
+    assert mock_sleep.call_count == 2     # 只在第 1、2 次失败后 sleep
+    mock_dlq.assert_called_once()
+    assert mock_dlq.call_args[0][2] == "TemporaryFailure"
+
+
+@patch("main.time.sleep")
+@patch("main.send_to_dlq")
+def test_process_with_retry_succeeds_on_second_attempt(mock_dlq, mock_sleep):
+    """第一次失败，第二次成功 → 不进 DLQ"""
+    handler = MagicMock(side_effect=[Exception("timeout"), None])
+    process_with_retry(handler, AI_DATA, "{}")
+    assert handler.call_count == 2
+    mock_dlq.assert_not_called()
+    mock_sleep.assert_called_once()       # 只在第 1 次失败后 sleep
