@@ -48,3 +48,37 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/prguard-${{ matrix.service }}:latest
             ghcr.io/${{ github.repository_owner }}/prguard-${{ matrix.service }}:${{ github.event.workflow_run.head_sha }}
+
+  deploy:
+    name: Deploy to Kubernetes
+    needs: build-and-push   # 所有镜像 build 完才开始部署
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        # 把 GitHub Secret 里存的 kubeconfig 写到文件
+        # 生产环境：在 GitHub repo Settings → Secrets 里添加 KUBECONFIG
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+
+      - name: Rolling update all services
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          for service in webhook-service ai-review-worker security-scanner result-service notifier; do
+            kubectl set image deployment/$service \
+              $service=ghcr.io/$OWNER/prguard-$service:$SHA \
+              -n prguard
+            echo "Updated $service to $SHA"
+          done
+
+      - name: Wait for rollouts to complete
+        run: |
+          for service in webhook-service ai-review-worker security-scanner result-service notifier; do
+            kubectl rollout status deployment/$service -n prguard --timeout=120s
+          done
