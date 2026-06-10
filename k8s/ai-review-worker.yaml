@@ -41,22 +41,22 @@ spec:
               cpu: "500m"
               memory: "512Mi"
 ---
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+# KEDA ScaledObject: scales based on Kafka consumer lag
+# More accurate than CPU-based HPA for I/O-bound workloads like Claude API calls
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
 metadata:
-  name: ai-review-worker-hpa
+  name: ai-review-worker-scaledobject
   namespace: prguard
 spec:
   scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
     name: ai-review-worker
-  minReplicas: 1
-  maxReplicas: 5
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: host.docker.internal:9092
+        consumerGroup: ai-review-group
+        topic: pr-events
+        lagThreshold: "10"   # scale up when lag exceeds 10 messages per replica
