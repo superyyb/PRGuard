@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "features/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Test webhook-service
+        working-directory: services/webhook-service
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+          pytest test_main.py -v
+
+      - name: Test ai-review-worker
+        working-directory: services/ai-review-worker
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+          pytest test_main.py -v
+
+      - name: Test security-scanner
+        working-directory: services/security-scanner
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+          pytest test_main.py -v
+
+      - name: Test result-service
+        working-directory: services/result-service
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+          pytest test_main.py test_database.py -v

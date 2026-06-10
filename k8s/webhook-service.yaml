@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-service
+  namespace: prguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webhook-service
+  template:
+    metadata:
+      labels:
+        app: webhook-service
+    spec:
+      containers:
+        - name: webhook-service
+          image: githubautomation-webhook-service:latest
+          imagePullPolicy: Never   # 使用本地镜像
+          ports:
+            - containerPort: 8000
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: prguard-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: prguard-secrets
+                  key: GITHUB_WEBHOOK_SECRET
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-service
+  namespace: prguard
+spec:
+  selector:
+    app: webhook-service
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30080
+  type: NodePort

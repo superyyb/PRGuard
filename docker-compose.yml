@@ -54,6 +54,8 @@ services:
 
   ai-review-worker:
     build: ./services/ai-review-worker
+    volumes:
+      - ./services/ai-review-worker:/app
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       GITHUB_TOKEN: ${GITHUB_TOKEN}

@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-scanner
+  namespace: prguard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: security-scanner
+  template:
+    metadata:
+      labels:
+        app: security-scanner
+    spec:
+      containers:
+        - name: security-scanner
+          image: githubautomation-security-scanner:latest
+          imagePullPolicy: Never
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: prguard-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: prguard-secrets
+                  key: GITHUB_TOKEN
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
