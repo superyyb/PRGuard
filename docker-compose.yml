@@ -89,6 +89,19 @@ services:
       timeout: 5s
       retries: 10
 
+  notifier:
+    build: ./services/notifier
+    volumes:
+      - ./services/notifier:/app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      GMAIL_USER: ${GMAIL_USER}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD}
+      NOTIFY_EMAIL: ${NOTIFY_EMAIL}
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   result-service:
     build: ./services/result-service
     environment:
