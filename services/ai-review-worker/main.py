@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 
 import anthropic
 import httpx
@@ -11,6 +12,9 @@ load_dotenv()
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+HEALTHY_FILE = pathlib.Path("/tmp/healthy")  # liveness: 循环还在跑
+READY_FILE = pathlib.Path("/tmp/ready")      # readiness: 已连上 Kafka
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -120,10 +124,12 @@ def process_event(event: dict):
 
 def main():
     consumer.subscribe(["pr-events"])
+    READY_FILE.touch()   # Readiness: 成功订阅 Kafka topic，可以接收消息了
     print("[AI Worker] Started, waiting for PR events...")
 
     try:
         while True:
+            HEALTHY_FILE.touch()  # Liveness: 每次 poll 前更新时间戳，证明循环没卡死
             msg = consumer.poll(timeout=1.0)
             if msg is None:
                 continue

@@ -33,6 +33,24 @@ spec:
                 secretKeyRef:
                   name: prguard-secrets
                   key: ANTHROPIC_API_KEY
+          livenessProbe:
+            exec:
+              # 检查 /tmp/healthy 在 90 秒内是否被更新过
+              # 如果 poll 循环卡死（如 Claude API 无响应），文件停止更新，触发重启
+              command:
+                - /bin/sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy) )) -lt 90"
+            initialDelaySeconds: 15   # 等待启动完成
+            periodSeconds: 30         # 每 30 秒检查一次
+            failureThreshold: 3       # 连续失败 3 次（90秒无更新）才重启
+          readinessProbe:
+            exec:
+              # 检查 /tmp/ready 是否存在，存在说明已成功订阅 Kafka topic
+              command: ["cat", "/tmp/ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
               cpu: "100m"
