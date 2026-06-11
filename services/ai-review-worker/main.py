@@ -35,8 +35,8 @@ def fetch_pr_diff(diff_url: str) -> str:
     }
     response = httpx.get(diff_url, headers=headers, follow_redirects=True)
     response.raise_for_status()
-    # diff 可能很长，截取前 8000 字符避免超出 token 限制
-    return response.text[:8000]
+    # Haiku 4.5 supports 200K token context; 50000 chars ≈ 12500 tokens, covers ~1000 lines of changes
+    return response.text[:50000]
 
 
 def analyze_with_ai(pr_title: str, diff: str) -> dict:
