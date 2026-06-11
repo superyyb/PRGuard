@@ -25,8 +25,8 @@ spec:
                   key: KAFKA_BOOTSTRAP_SERVERS
             - name: DATABASE_URL
               valueFrom:
-                configMapKeyRef:
-                  name: prguard-config
+                secretKeyRef:
+                  name: prguard-secrets
                   key: DATABASE_URL
             - name: GITHUB_TOKEN
               valueFrom:

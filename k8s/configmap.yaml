@@ -5,4 +5,3 @@ metadata:
   namespace: prguard
 data:
   KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-  DATABASE_URL: "postgresql://postgres:postgres@postgres:5432/pr_reviews"
