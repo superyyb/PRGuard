@@ -4,5 +4,4 @@ metadata:
   name: prguard-config
   namespace: prguard
 data:
-  KAFKA_BOOTSTRAP_SERVERS: "host.docker.internal:9092"
-  DATABASE_URL: "postgresql://postgres:postgres@host.docker.internal:5432/pr_reviews"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
