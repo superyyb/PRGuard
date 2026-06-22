@@ -90,8 +90,6 @@ Respond with ONLY valid JSON (no markdown, no extra text):
             if attempt == 2:
                 raise
 
-    raise RuntimeError("unreachable")
-
 
 def delivery_report(err, msg):
     if err:
