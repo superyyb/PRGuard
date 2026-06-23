@@ -74,7 +74,7 @@ spec:
   triggers:
     - type: kafka
       metadata:
-        bootstrapServers: host.docker.internal:9092
+        bootstrapServers: kafka.prguard.svc.cluster.local:9092
         consumerGroup: ai-review-group
         topic: pr-events
         lagThreshold: "10"   # scale up when lag exceeds 10 messages per replica
