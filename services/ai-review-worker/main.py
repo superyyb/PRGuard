@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import pathlib
+import time
 
 import anthropic
 import httpx
@@ -133,19 +134,34 @@ Respond with ONLY valid JSON (no markdown, no extra text):
   "approved": <true if score >= 6, false otherwise>
 }}"""
 
-    message = anthropic_client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    for attempt in range(1, 3):
+        try:
+            message = anthropic_client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=60.0,
+            )
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
+            print(f"[AI Worker] API error (attempt {attempt}/2): {e}")
+            if attempt == 2:
+                raise
+            time.sleep(2)
+            continue
 
-    response_text = message.content[0].text.strip()
-    if response_text.startswith("```"):
-        response_text = response_text.split("```")[1]
-        if response_text.startswith("json"):
-            response_text = response_text[4:]
-    response_text = response_text.strip()
-    return json.loads(response_text)
+        response_text = message.content[0].text.strip()
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+        response_text = response_text.strip()
+
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            print(f"[AI Worker] JSON parse error (attempt {attempt}/2): {e}")
+            if attempt == 2:
+                raise
 
 
 def delivery_report(err, msg):
