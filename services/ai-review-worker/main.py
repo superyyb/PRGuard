@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import time
 
 import anthropic
 import httpx
@@ -70,11 +71,19 @@ Respond with ONLY valid JSON (no markdown, no extra text):
 }}"""
 
     for attempt in range(1, 3):
-        message = anthropic_client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            message = anthropic_client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=60.0,
+            )
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
+            print(f"[AI Worker] API error (attempt {attempt}/2): {e}")
+            if attempt == 2:
+                raise
+            time.sleep(2)
+            continue
 
         response_text = message.content[0].text.strip()
         if response_text.startswith("```"):
