@@ -140,7 +140,7 @@ Respond with ONLY valid JSON (no markdown, no extra text):
                 model="claude-haiku-4-5",
                 max_tokens=1024,
                 messages=[{"role": "user", "content": prompt}],
-                timeout=60.0,
+                timeout=45.0,
             )
         except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
             print(f"[AI Worker] API error (attempt {attempt}/2): {e}")

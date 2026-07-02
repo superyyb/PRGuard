@@ -65,7 +65,7 @@ async def github_webhook(
         "repo_full_name": data["repository"]["full_name"],
         "head_sha": pr["head"]["sha"],
         "base_sha": pr["base"]["sha"],
-        "diff_url": pr["diff_url"],
+        "diff_url": f"https://api.github.com/repos/{data['repository']['full_name']}/pulls/{pr['number']}",
         "html_url": pr["html_url"],
         "action": action,
     }
