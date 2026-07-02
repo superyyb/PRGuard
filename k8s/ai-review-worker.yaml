@@ -40,7 +40,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy) )) -lt 90"
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy) )) -lt 120"
             initialDelaySeconds: 15   # 等待启动完成
             periodSeconds: 30         # 每 30 秒检查一次
             failureThreshold: 3       # 连续失败 3 次（90秒无更新）才重启
