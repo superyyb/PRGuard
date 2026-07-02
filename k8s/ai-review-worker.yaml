@@ -35,7 +35,7 @@ spec:
                   key: ANTHROPIC_API_KEY
           livenessProbe:
             exec:
-              # 检查 /tmp/healthy 在 90 秒内是否被更新过
+              # 检查 /tmp/healthy 在 120 秒内是否被更新过
               # 如果 poll 循环卡死（如 Claude API 无响应），文件停止更新，触发重启
               command:
                 - /bin/sh
