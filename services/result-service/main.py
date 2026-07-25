@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import os
 import threading
 import time
@@ -27,6 +28,21 @@ load_dotenv()
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 DLQ_TOPIC = "pr-events-dlq"
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("result-service")
+
+
+def log_event(stage: str, trace_id: str, **fields):
+    logger.info(json.dumps({"service": "result-service", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def extract_trace_id(msg) -> str:
+    for key, value in msg.headers() or []:
+        if key == "trace_id":
+            return value.decode()
+    return "unknown"
+
+
 # Lazy-initialized DLQ producer, shared across threads
 _dlq_producer = None
 _dlq_lock = threading.Lock()
@@ -40,7 +56,7 @@ def get_dlq_producer() -> Producer:
     return _dlq_producer
 
 
-def send_to_dlq(raw_message: str, error: str, error_type: str, attempts: int):
+def send_to_dlq(raw_message: str, error: str, error_type: str, attempts: int, trace_id: str = "unknown"):
     """把失败的消息发到 Dead Letter Queue，保留原始内容 + 错误信息。"""
     producer = get_dlq_producer()
     dlq_payload = json.dumps({
@@ -48,6 +64,7 @@ def send_to_dlq(raw_message: str, error: str, error_type: str, attempts: int):
         "error": error,
         "error_type": error_type,
         "attempts": attempts,
+        "trace_id": trace_id,
         "failed_at": datetime.datetime.utcnow().isoformat(),
     })
     producer.produce(DLQ_TOPIC, dlq_payload.encode("utf-8"))
@@ -55,7 +72,7 @@ def send_to_dlq(raw_message: str, error: str, error_type: str, attempts: int):
     print(f"[Result Service] 📨 Sent to DLQ ({error_type}, {attempts} attempts): {error}")
 
 
-def process_with_retry(handler, data: dict, raw: str, max_retries: int = 3):
+def process_with_retry(handler, data: dict, raw: str, trace_id: str = "unknown", max_retries: int = 3):
     """
     区分暂时失败和永久失败：
     - KeyError / ValueError → 永久失败（消息结构错误），直接进 DLQ，不重试
@@ -65,13 +82,13 @@ def process_with_retry(handler, data: dict, raw: str, max_retries: int = 3):
         try:
             print(f"[Result Service] Processing PR #{data.get('pr_number', '?')} "
                   f"attempt {attempt}/{max_retries}")
-            handler(data)
+            handler(data, trace_id)
             print(f"[Result Service] ✅ PR #{data.get('pr_number', '?')} processed successfully")
             return
         except (KeyError, ValueError) as e:
             # 永久失败：消息本身有问题，重试也没用
             print(f"[Result Service] ❌ Permanent failure: {e}")
-            send_to_dlq(raw, str(e), "PermanentFailure", attempt)
+            send_to_dlq(raw, str(e), "PermanentFailure", attempt, trace_id)
             return
         except Exception as e:
             if attempt < max_retries:
@@ -81,7 +98,7 @@ def process_with_retry(handler, data: dict, raw: str, max_retries: int = 3):
                 time.sleep(wait)
             else:
                 print(f"[Result Service] ❌ All {max_retries} retries exhausted: {e}")
-                send_to_dlq(raw, str(e), "TemporaryFailure", attempt)
+                send_to_dlq(raw, str(e), "TemporaryFailure", attempt, trace_id)
 
 
 def make_consumer(group_id: str) -> Consumer:
@@ -107,21 +124,23 @@ def consume_loop(topic: str, group_id: str, handler):
                 continue
 
             raw = msg.value().decode("utf-8")
+            trace_id = extract_trace_id(msg)
 
             # JSON 解析失败 = 永久失败，直接进 DLQ
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as e:
                 print(f"[Result Service] ❌ Invalid JSON: {e}")
-                send_to_dlq(raw, str(e), "PermanentFailure", 1)
+                send_to_dlq(raw, str(e), "PermanentFailure", 1, trace_id)
                 continue
 
-            process_with_retry(handler, data, raw)
+            process_with_retry(handler, data, raw, trace_id)
     finally:
         consumer.close()
 
 
-def handle_ai_result(data: dict):
+def handle_ai_result(data: dict, trace_id: str = "unknown"):
+    t0 = time.perf_counter()
     pr_number = data["pr_number"]
     repo = data["repo_full_name"]
     head_sha = data["head_sha"]
@@ -138,9 +157,11 @@ def handle_ai_result(data: dict):
     post_pr_comment(repo, pr_number, comment)
     mark_ai_comment_posted(repo, pr_number, head_sha)
     print(f"[Result Service] AI review posted and saved for PR #{pr_number}")
+    log_event("result_publish_ai", trace_id, pr_number=pr_number, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
 
 
-def handle_security_result(data: dict):
+def handle_security_result(data: dict, trace_id: str = "unknown"):
+    t0 = time.perf_counter()
     pr_number = data["pr_number"]
     repo = data["repo_full_name"]
     head_sha = data["head_sha"]
@@ -158,6 +179,7 @@ def handle_security_result(data: dict):
     post_pr_comment(repo, pr_number, comment)
     mark_security_comment_posted(repo, pr_number, head_sha)
     print(f"[Result Service] Security scan posted and saved for PR #{pr_number}")
+    log_event("result_publish_security", trace_id, pr_number=pr_number, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
 
 
 def main():

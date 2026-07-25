@@ -1,7 +1,10 @@
 import hashlib
 import hmac
 import json
+import logging
 import os
+import time
+import uuid
 
 from confluent_kafka import Producer
 from dotenv import load_dotenv
@@ -16,6 +19,13 @@ WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
 producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("webhook-service")
+
+
+def log_event(stage: str, trace_id: str, **fields):
+    logger.info(json.dumps({"service": "webhook-service", "trace_id": trace_id, "stage": stage, **fields}))
 
 
 def verify_signature(payload: bytes, signature: str) -> bool:
@@ -40,7 +50,10 @@ async def github_webhook(
     request: Request,
     x_github_event: str = Header(None),
     x_hub_signature_256: str = Header(None),
+    x_github_delivery: str = Header(None),
 ):
+    t0 = time.perf_counter()
+    trace_id = x_github_delivery or str(uuid.uuid4())
     payload = await request.body()
 
     # 验签
@@ -74,11 +87,19 @@ async def github_webhook(
         "pr-events",
         key=str(pr["number"]),
         value=json.dumps(event),
+        headers=[("trace_id", trace_id.encode())],
         callback=delivery_report,
     )
     producer.flush()
 
-    print(f"[Webhook] Published PR #{pr['number']} from {data['repository']['full_name']}")
+    duration_ms = (time.perf_counter() - t0) * 1000
+    log_event(
+        "webhook_publish",
+        trace_id,
+        pr_number=pr["number"],
+        repo=data["repository"]["full_name"],
+        duration_ms=round(duration_ms, 2),
+    )
     return JSONResponse({"status": "published", "pr_number": pr["number"]})
 
 
