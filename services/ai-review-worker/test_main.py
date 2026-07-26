@@ -19,9 +19,17 @@ MOCK_EVENT = {
     "title": "Add login endpoint",
     "repo_full_name": "owner/repo",
     "head_sha": "abc123",
-    "diff_url": "https://github.com/owner/repo/pull/1.diff",
     "html_url": "https://github.com/owner/repo/pull/1",
 }
+
+MOCK_FILES = [
+    {
+        "filename": "auth.py",
+        "status": "modified",
+        "patch": "@@ -1,3 +1,5 @@\n+def login():\n+    pass",
+        "contents_url": "https://api.github.com/repos/owner/repo/contents/auth.py?ref=abc123",
+    }
+]
 
 
 @patch("main.anthropic_client")
@@ -30,7 +38,7 @@ def test_analyze_with_ai(mock_anthropic):
     mock_content.text = json.dumps(MOCK_REVIEW)
     mock_anthropic.messages.create.return_value = MagicMock(content=[mock_content])
 
-    result = analyze_with_ai("Add login endpoint", "diff content here")
+    result = analyze_with_ai("Add login endpoint", "context content here")
 
     assert result["score"] == 7
     assert result["approved"] is False
@@ -40,14 +48,15 @@ def test_analyze_with_ai(mock_anthropic):
 
 @patch("main.producer")
 @patch("main.analyze_with_ai", return_value=MOCK_REVIEW)
-@patch("main.fetch_pr_diff", return_value="+ def login(): pass")
-def test_process_event(mock_diff, mock_analyze, mock_producer):
+@patch("main.fetch_file_content", return_value="def existing(): pass")
+@patch("main.fetch_pr_files", return_value=MOCK_FILES)
+def test_process_event(mock_files, mock_content, mock_analyze, mock_producer):
     mock_producer.produce = MagicMock()
     mock_producer.flush = MagicMock()
 
     process_event(MOCK_EVENT)
 
-    mock_diff.assert_called_once_with(MOCK_EVENT["diff_url"])
+    mock_files.assert_called_once_with("owner/repo", 1)
     mock_analyze.assert_called_once()
     mock_producer.produce.assert_called_once()
 
@@ -62,8 +71,8 @@ def test_process_event(mock_diff, mock_analyze, mock_producer):
 
 
 @patch("main.producer")
-@patch("main.fetch_pr_diff", return_value="   ")
-def test_process_event_skips_empty_diff(mock_diff, mock_producer):
+@patch("main.fetch_pr_files", return_value=[])   # 没有改动文件
+def test_process_event_skips_empty_diff(mock_files, mock_producer):
     mock_producer.produce = MagicMock()
 
     process_event(MOCK_EVENT)
