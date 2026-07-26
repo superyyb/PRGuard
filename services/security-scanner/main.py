@@ -1,12 +1,28 @@
 import json
+import logging
 import os
 import re
+import time
 
 import httpx
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("security-scanner")
+
+
+def log_event(stage: str, trace_id: str, **fields):
+    logger.info(json.dumps({"service": "security-scanner", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def extract_trace_id(msg) -> str:
+    for key, value in msg.headers() or []:
+        if key == "trace_id":
+            return value.decode()
+    return "unknown"
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -72,12 +88,16 @@ def delivery_report(err, msg):
         print(f"[Kafka] Delivered to {msg.topic()} [{msg.partition()}]")
 
 
-def process_event(event: dict):
+def process_event(event: dict, trace_id: str = "unknown"):
+    t0 = time.perf_counter()
     pr_number = event["pr_number"]
     repo = event["repo_full_name"]
     print(f"[Security Scanner] Scanning PR #{pr_number} from {repo}")
 
+    t_diff = time.perf_counter()
     diff = fetch_pr_diff(event["diff_url"])
+    log_event("fetch_diff", trace_id, pr_number=pr_number, duration_ms=round((time.perf_counter() - t_diff) * 1000, 2))
+
     findings = scan_diff(diff)
 
     high_count = sum(1 for f in findings if f["severity"] == "high")
@@ -97,9 +117,12 @@ def process_event(event: dict):
         "security-results",
         key=str(pr_number),
         value=json.dumps(result),
+        headers=[("trace_id", trace_id.encode())],
         callback=delivery_report,
     )
     producer.flush()
+
+    log_event("security_scan", trace_id, pr_number=pr_number, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
 
 
 def main():
@@ -116,8 +139,9 @@ def main():
                 continue
 
             event = json.loads(msg.value().decode("utf-8"))
+            trace_id = extract_trace_id(msg)
             try:
-                process_event(event)
+                process_event(event, trace_id)
             except Exception as e:
                 print(f"[Security Scanner] Error processing PR #{event.get('pr_number')}: {e}")
     finally:

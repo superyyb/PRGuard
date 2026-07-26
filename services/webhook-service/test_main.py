@@ -43,12 +43,16 @@ def test_webhook_pr_opened(mock_producer):
         headers={
             "X-GitHub-Event": "pull_request",
             "X-Hub-Signature-256": make_signature(payload),
+            "X-GitHub-Delivery": "test-delivery-id",
             "Content-Type": "application/json",
         },
     )
     assert response.status_code == 200
     assert response.json()["status"] == "published"
     mock_producer.produce.assert_called_once()
+
+    call_kwargs = mock_producer.produce.call_args
+    assert call_kwargs[1]["headers"] == [("trace_id", b"test-delivery-id")]
 
 
 @patch("main.producer")

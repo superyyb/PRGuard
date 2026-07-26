@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 import pathlib
 import time
@@ -10,6 +11,20 @@ from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("ai-review-worker")
+
+
+def log_event(stage: str, trace_id: str, **fields):
+    logger.info(json.dumps({"service": "ai-review-worker", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def extract_trace_id(msg) -> str:
+    for key, value in msg.headers() or []:
+        if key == "trace_id":
+            return value.decode()
+    return "unknown"
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -171,18 +186,26 @@ def delivery_report(err, msg):
         print(f"[Kafka] Delivered to {msg.topic()} [{msg.partition()}]")
 
 
-def process_event(event: dict):
+def process_event(event: dict, trace_id: str = "unknown"):
+    t0 = time.perf_counter()
     pr_number = event["pr_number"]
     repo = event["repo_full_name"]
     print(f"[AI Worker] Processing PR #{pr_number} from {repo}")
 
+    t_context = time.perf_counter()
     files = fetch_pr_files(repo, pr_number)
     context = build_review_context(files)
+    context_ms = (time.perf_counter() - t_context) * 1000
+    log_event("build_context", trace_id, pr_number=pr_number, duration_ms=round(context_ms, 2))
+
     if not context.strip():
         print(f"[AI Worker] PR #{pr_number} has no reviewable changes, skipping")
         return
 
+    t_ai = time.perf_counter()
     review = analyze_with_ai(event["title"], context)
+    ai_ms = (time.perf_counter() - t_ai) * 1000
+    log_event("claude_call", trace_id, pr_number=pr_number, duration_ms=round(ai_ms, 2))
     print(f"[AI Worker] PR #{pr_number} score: {review.get('score')}/10")
 
     result = {
@@ -198,9 +221,13 @@ def process_event(event: dict):
         "ai-results",
         key=str(pr_number),
         value=json.dumps(result),
+        headers=[("trace_id", trace_id.encode())],
         callback=delivery_report,
     )
     producer.flush()
+
+    total_ms = (time.perf_counter() - t0) * 1000
+    log_event("ai_review", trace_id, pr_number=pr_number, duration_ms=round(total_ms, 2))
 
 
 def main():
@@ -219,8 +246,9 @@ def main():
                 continue
 
             event = json.loads(msg.value().decode("utf-8"))
+            trace_id = extract_trace_id(msg)
             try:
-                process_event(event)
+                process_event(event, trace_id)
             except Exception as e:
                 print(f"[AI Worker] Error processing PR #{event.get('pr_number')}: {e}")
     finally:

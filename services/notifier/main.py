@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import smtplib
 import time
@@ -9,6 +10,20 @@ from confluent_kafka import Consumer
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger("notifier")
+
+
+def log_event(stage: str, trace_id: str, **fields):
+    logger.info(json.dumps({"service": "notifier", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def extract_trace_id(msg) -> str:
+    for key, value in msg.headers() or []:
+        if key == "trace_id":
+            return value.decode()
+    return "unknown"
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GMAIL_USER = os.getenv("GMAIL_USER", "")
@@ -126,7 +141,8 @@ def send_email(subject: str, body: str, max_retries: int = 3):
                 print(f"[Notifier] Failed to send email after {max_retries} attempts")
 
 
-def process_event(event: dict):
+def process_event(event: dict, trace_id: str = "unknown"):
+    t0 = time.perf_counter()
     pr_number = event.get("pr_number")
     repo = event.get("repo_full_name", "")
     html_url = event.get("html_url", "")
@@ -134,6 +150,7 @@ def process_event(event: dict):
 
     if not should_notify(review):
         print(f"[Notifier] PR #{pr_number} score {review.get('score')}/10 — no notification needed")
+        log_event("notify", trace_id, pr_number=pr_number, sent=False, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
         return
 
     score = review.get("score", 0)
@@ -143,6 +160,7 @@ def process_event(event: dict):
 
     send_email(subject, body)
     print(f"[Notifier] PR #{pr_number} — notified {NOTIFY_EMAIL} (score: {score}/10)")
+    log_event("notify", trace_id, pr_number=pr_number, sent=True, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
 
 
 def main():
@@ -159,8 +177,9 @@ def main():
                 continue
 
             event = json.loads(msg.value().decode("utf-8"))
+            trace_id = extract_trace_id(msg)
             try:
-                process_event(event)
+                process_event(event, trace_id)
             except Exception as e:
                 print(f"[Notifier] Error processing PR #{event.get('pr_number')}: {e}")
     finally:
