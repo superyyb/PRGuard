@@ -41,6 +41,11 @@ spec:
                 secretKeyRef:
                   name: prguard-secrets
                   key: NOTIFY_EMAIL
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: prguard-secrets
+                  key: DATABASE_URL
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://jaeger-service:4318"
           resources:

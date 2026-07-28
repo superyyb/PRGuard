@@ -102,9 +102,12 @@ services:
       GMAIL_USER: ${GMAIL_USER}
       GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD}
       NOTIFY_EMAIL: ${NOTIFY_EMAIL}
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/pr_reviews
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     depends_on:
       kafka:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   result-service:
