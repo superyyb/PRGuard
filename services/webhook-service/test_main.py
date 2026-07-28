@@ -52,7 +52,7 @@ def test_webhook_pr_opened(mock_producer):
     mock_producer.produce.assert_called_once()
 
     call_kwargs = mock_producer.produce.call_args
-    assert call_kwargs[1]["headers"] == [("trace_id", b"test-delivery-id")]
+    assert ("trace_id", b"test-delivery-id") in call_kwargs[1]["headers"]
 
 
 @patch("main.producer")

@@ -36,6 +36,8 @@ spec:
                 secretKeyRef:
                   name: prguard-secrets
                   key: GITHUB_TOKEN
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger-service:4318"
           resources:
             requests:
               cpu: "50m"

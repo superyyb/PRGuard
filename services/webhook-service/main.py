@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram, make_asgi_app
+from opentelemetry import propagate, trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 load_dotenv()
 
@@ -19,11 +25,25 @@ app.mount("/metrics", make_asgi_app())
 
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
 
 producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("webhook-service")
+
+provider = TracerProvider(resource=Resource.create({"service.name": "webhook-service"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces")))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("webhook-service")
+FastAPIInstrumentor.instrument_app(app)
+
+
+def inject_otel_headers(headers: list) -> list:
+    carrier = {}
+    propagate.inject(carrier)
+    headers.extend((k, v.encode()) for k, v in carrier.items())
+    return headers
 
 STAGE_DURATION = Histogram(
     "pr_stage_duration_seconds", "Duration of each pipeline stage",
@@ -100,11 +120,14 @@ async def github_webhook(
         "action": action,
     }
 
+    current_span = trace.get_current_span()
+    current_span.set_attribute("prguard.trace_id", trace_id)
+
     producer.produce(
         "pr-events",
         key=str(pr["number"]),
         value=json.dumps(event),
-        headers=[("trace_id", trace_id.encode())],
+        headers=inject_otel_headers([("trace_id", trace_id.encode())]),
         callback=delivery_report,
     )
     producer.flush()

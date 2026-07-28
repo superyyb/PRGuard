@@ -2,3 +2,6 @@ confluent-kafka==2.4.0
 python-dotenv==1.0.1
 # Note: smtplib, email, time are Python standard library modules (no install needed)
 prometheus-client==0.20.0
+opentelemetry-api==1.25.0
+opentelemetry-sdk==1.25.0
+opentelemetry-exporter-otlp-proto-http==1.25.0

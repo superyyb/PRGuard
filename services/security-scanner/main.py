@@ -8,6 +8,12 @@ import httpx
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, start_http_server
+from opentelemetry import propagate, trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 load_dotenv()
 
@@ -24,6 +30,13 @@ STAGE_TOTAL = Counter(
     ["service", "stage", "outcome"],
 )
 
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+provider = TracerProvider(resource=Resource.create({"service.name": "security-scanner"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces")))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("security-scanner")
+HTTPXClientInstrumentor().instrument()
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "security-scanner", "trace_id": trace_id, "stage": stage, **fields}))
@@ -39,6 +52,18 @@ def extract_trace_id(msg) -> str:
         if key == "trace_id":
             return value.decode()
     return "unknown"
+
+
+def extract_otel_context(msg):
+    carrier = {k: v.decode() for k, v in (msg.headers() or [])}
+    return propagate.extract(carrier)
+
+
+def inject_otel_headers(headers: list) -> list:
+    carrier = {}
+    propagate.inject(carrier)
+    headers.extend((k, v.encode()) for k, v in carrier.items())
+    return headers
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -104,45 +129,48 @@ def delivery_report(err, msg):
         print(f"[Kafka] Delivered to {msg.topic()} [{msg.partition()}]")
 
 
-def process_event(event: dict, trace_id: str = "unknown"):
-    t0 = time.perf_counter()
-    pr_number = event["pr_number"]
-    repo = event["repo_full_name"]
-    print(f"[Security Scanner] Scanning PR #{pr_number} from {repo}")
+def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
+    with tracer.start_as_current_span("security_scan", context=otel_context) as span:
+        span.set_attribute("prguard.trace_id", trace_id)
 
-    t_diff = time.perf_counter()
-    diff = fetch_pr_diff(event["diff_url"])
-    diff_ms = (time.perf_counter() - t_diff) * 1000
-    log_event("fetch_diff", trace_id, pr_number=pr_number, duration_ms=round(diff_ms, 2))
-    record_stage("fetch_diff", diff_ms)
+        t0 = time.perf_counter()
+        pr_number = event["pr_number"]
+        repo = event["repo_full_name"]
+        print(f"[Security Scanner] Scanning PR #{pr_number} from {repo}")
 
-    findings = scan_diff(diff)
+        t_diff = time.perf_counter()
+        diff = fetch_pr_diff(event["diff_url"])
+        diff_ms = (time.perf_counter() - t_diff) * 1000
+        log_event("fetch_diff", trace_id, pr_number=pr_number, duration_ms=round(diff_ms, 2))
+        record_stage("fetch_diff", diff_ms)
 
-    high_count = sum(1 for f in findings if f["severity"] == "high")
-    print(f"[Security Scanner] PR #{pr_number}: {len(findings)} findings ({high_count} high)")
+        findings = scan_diff(diff)
 
-    result = {
-        "type": "security_scan",
-        "pr_number": pr_number,
-        "repo_full_name": repo,
-        "head_sha": event["head_sha"],
-        "html_url": event["html_url"],
-        "findings": findings,
-        "passed": high_count == 0,
-    }
+        high_count = sum(1 for f in findings if f["severity"] == "high")
+        print(f"[Security Scanner] PR #{pr_number}: {len(findings)} findings ({high_count} high)")
 
-    producer.produce(
-        "security-results",
-        key=str(pr_number),
-        value=json.dumps(result),
-        headers=[("trace_id", trace_id.encode())],
-        callback=delivery_report,
-    )
-    producer.flush()
+        result = {
+            "type": "security_scan",
+            "pr_number": pr_number,
+            "repo_full_name": repo,
+            "head_sha": event["head_sha"],
+            "html_url": event["html_url"],
+            "findings": findings,
+            "passed": high_count == 0,
+        }
 
-    total_ms = (time.perf_counter() - t0) * 1000
-    log_event("security_scan", trace_id, pr_number=pr_number, duration_ms=round(total_ms, 2))
-    record_stage("security_scan", total_ms)
+        producer.produce(
+            "security-results",
+            key=str(pr_number),
+            value=json.dumps(result),
+            headers=inject_otel_headers([("trace_id", trace_id.encode())]),
+            callback=delivery_report,
+        )
+        producer.flush()
+
+        total_ms = (time.perf_counter() - t0) * 1000
+        log_event("security_scan", trace_id, pr_number=pr_number, duration_ms=round(total_ms, 2))
+        record_stage("security_scan", total_ms)
 
 
 def main():
@@ -161,8 +189,9 @@ def main():
 
             event = json.loads(msg.value().decode("utf-8"))
             trace_id = extract_trace_id(msg)
+            otel_context = extract_otel_context(msg)
             try:
-                process_event(event, trace_id)
+                process_event(event, trace_id, otel_context)
             except Exception as e:
                 print(f"[Security Scanner] Error processing PR #{event.get('pr_number')}: {e}")
                 STAGE_TOTAL.labels(service="security-scanner", stage="security_scan", outcome="error").inc()

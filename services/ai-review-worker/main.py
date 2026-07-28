@@ -10,6 +10,12 @@ import httpx
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, start_http_server
+from opentelemetry import propagate, trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 load_dotenv()
 
@@ -26,6 +32,13 @@ STAGE_TOTAL = Counter(
     ["service", "stage", "outcome"],
 )
 
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+provider = TracerProvider(resource=Resource.create({"service.name": "ai-review-worker"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces")))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("ai-review-worker")
+HTTPXClientInstrumentor().instrument()
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "ai-review-worker", "trace_id": trace_id, "stage": stage, **fields}))
@@ -41,6 +54,18 @@ def extract_trace_id(msg) -> str:
         if key == "trace_id":
             return value.decode()
     return "unknown"
+
+
+def extract_otel_context(msg):
+    carrier = {k: v.decode() for k, v in (msg.headers() or [])}
+    return propagate.extract(carrier)
+
+
+def inject_otel_headers(headers: list) -> list:
+    carrier = {}
+    propagate.inject(carrier)
+    headers.extend((k, v.encode()) for k, v in carrier.items())
+    return headers
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -202,51 +227,56 @@ def delivery_report(err, msg):
         print(f"[Kafka] Delivered to {msg.topic()} [{msg.partition()}]")
 
 
-def process_event(event: dict, trace_id: str = "unknown"):
-    t0 = time.perf_counter()
-    pr_number = event["pr_number"]
-    repo = event["repo_full_name"]
-    print(f"[AI Worker] Processing PR #{pr_number} from {repo}")
+def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
+    with tracer.start_as_current_span("ai_review", context=otel_context) as span:
+        span.set_attribute("prguard.trace_id", trace_id)
 
-    t_context = time.perf_counter()
-    files = fetch_pr_files(repo, pr_number)
-    context = build_review_context(files)
-    context_ms = (time.perf_counter() - t_context) * 1000
-    log_event("build_context", trace_id, pr_number=pr_number, duration_ms=round(context_ms, 2))
-    record_stage("build_context", context_ms)
+        t0 = time.perf_counter()
+        pr_number = event["pr_number"]
+        repo = event["repo_full_name"]
+        print(f"[AI Worker] Processing PR #{pr_number} from {repo}")
 
-    if not context.strip():
-        print(f"[AI Worker] PR #{pr_number} has no reviewable changes, skipping")
-        return
+        with tracer.start_as_current_span("build_context"):
+            t_context = time.perf_counter()
+            files = fetch_pr_files(repo, pr_number)
+            context = build_review_context(files)
+            context_ms = (time.perf_counter() - t_context) * 1000
+            log_event("build_context", trace_id, pr_number=pr_number, duration_ms=round(context_ms, 2))
+            record_stage("build_context", context_ms)
 
-    t_ai = time.perf_counter()
-    review = analyze_with_ai(event["title"], context)
-    ai_ms = (time.perf_counter() - t_ai) * 1000
-    log_event("claude_call", trace_id, pr_number=pr_number, duration_ms=round(ai_ms, 2))
-    record_stage("claude_call", ai_ms)
-    print(f"[AI Worker] PR #{pr_number} score: {review.get('score')}/10")
+        if not context.strip():
+            print(f"[AI Worker] PR #{pr_number} has no reviewable changes, skipping")
+            return
 
-    result = {
-        "type": "ai_review",
-        "pr_number": pr_number,
-        "repo_full_name": repo,
-        "head_sha": event["head_sha"],
-        "html_url": event["html_url"],
-        "review": review,
-    }
+        with tracer.start_as_current_span("claude_call"):
+            t_ai = time.perf_counter()
+            review = analyze_with_ai(event["title"], context)
+            ai_ms = (time.perf_counter() - t_ai) * 1000
+            log_event("claude_call", trace_id, pr_number=pr_number, duration_ms=round(ai_ms, 2))
+            record_stage("claude_call", ai_ms)
+        print(f"[AI Worker] PR #{pr_number} score: {review.get('score')}/10")
 
-    producer.produce(
-        "ai-results",
-        key=str(pr_number),
-        value=json.dumps(result),
-        headers=[("trace_id", trace_id.encode())],
-        callback=delivery_report,
-    )
-    producer.flush()
+        result = {
+            "type": "ai_review",
+            "pr_number": pr_number,
+            "repo_full_name": repo,
+            "head_sha": event["head_sha"],
+            "html_url": event["html_url"],
+            "review": review,
+        }
 
-    total_ms = (time.perf_counter() - t0) * 1000
-    log_event("ai_review", trace_id, pr_number=pr_number, duration_ms=round(total_ms, 2))
-    record_stage("ai_review", total_ms)
+        producer.produce(
+            "ai-results",
+            key=str(pr_number),
+            value=json.dumps(result),
+            headers=inject_otel_headers([("trace_id", trace_id.encode())]),
+            callback=delivery_report,
+        )
+        producer.flush()
+
+        total_ms = (time.perf_counter() - t0) * 1000
+        log_event("ai_review", trace_id, pr_number=pr_number, duration_ms=round(total_ms, 2))
+        record_stage("ai_review", total_ms)
 
 
 def main():
@@ -267,8 +297,9 @@ def main():
 
             event = json.loads(msg.value().decode("utf-8"))
             trace_id = extract_trace_id(msg)
+            otel_context = extract_otel_context(msg)
             try:
-                process_event(event, trace_id)
+                process_event(event, trace_id, otel_context)
             except Exception as e:
                 print(f"[AI Worker] Error processing PR #{event.get('pr_number')}: {e}")
                 STAGE_TOTAL.labels(service="ai-review-worker", stage="ai_review", outcome="error").inc()

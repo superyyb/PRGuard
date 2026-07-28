@@ -9,6 +9,11 @@ from email.mime.text import MIMEText
 from confluent_kafka import Consumer
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, start_http_server
+from opentelemetry import propagate, trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 load_dotenv()
 
@@ -25,6 +30,12 @@ STAGE_TOTAL = Counter(
     ["service", "stage", "outcome"],
 )
 
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+provider = TracerProvider(resource=Resource.create({"service.name": "notifier"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces")))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("notifier")
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "notifier", "trace_id": trace_id, "stage": stage, **fields}))
@@ -40,6 +51,11 @@ def extract_trace_id(msg) -> str:
         if key == "trace_id":
             return value.decode()
     return "unknown"
+
+
+def extract_otel_context(msg):
+    carrier = {k: v.decode() for k, v in (msg.headers() or [])}
+    return propagate.extract(carrier)
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GMAIL_USER = os.getenv("GMAIL_USER", "")
@@ -157,30 +173,33 @@ def send_email(subject: str, body: str, max_retries: int = 3):
                 print(f"[Notifier] Failed to send email after {max_retries} attempts")
 
 
-def process_event(event: dict, trace_id: str = "unknown"):
-    t0 = time.perf_counter()
-    pr_number = event.get("pr_number")
-    repo = event.get("repo_full_name", "")
-    html_url = event.get("html_url", "")
-    review = event.get("review", {})
+def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
+    with tracer.start_as_current_span("notify", context=otel_context) as span:
+        span.set_attribute("prguard.trace_id", trace_id)
 
-    if not should_notify(review):
-        print(f"[Notifier] PR #{pr_number} score {review.get('score')}/10 — no notification needed")
+        t0 = time.perf_counter()
+        pr_number = event.get("pr_number")
+        repo = event.get("repo_full_name", "")
+        html_url = event.get("html_url", "")
+        review = event.get("review", {})
+
+        if not should_notify(review):
+            print(f"[Notifier] PR #{pr_number} score {review.get('score')}/10 — no notification needed")
+            duration_ms = (time.perf_counter() - t0) * 1000
+            log_event("notify", trace_id, pr_number=pr_number, sent=False, duration_ms=round(duration_ms, 2))
+            record_stage("notify", duration_ms)
+            return
+
+        score = review.get("score", 0)
+        score_emoji = format_score_emoji(score)
+        subject = f"[PRGuard] ⚠️ PR #{pr_number} needs attention — Score: {score_emoji} {score}/10"
+        body = build_email_body(pr_number, repo, html_url, review)
+
+        send_email(subject, body)
+        print(f"[Notifier] PR #{pr_number} — notified {NOTIFY_EMAIL} (score: {score}/10)")
         duration_ms = (time.perf_counter() - t0) * 1000
-        log_event("notify", trace_id, pr_number=pr_number, sent=False, duration_ms=round(duration_ms, 2))
+        log_event("notify", trace_id, pr_number=pr_number, sent=True, duration_ms=round(duration_ms, 2))
         record_stage("notify", duration_ms)
-        return
-
-    score = review.get("score", 0)
-    score_emoji = format_score_emoji(score)
-    subject = f"[PRGuard] ⚠️ PR #{pr_number} needs attention — Score: {score_emoji} {score}/10"
-    body = build_email_body(pr_number, repo, html_url, review)
-
-    send_email(subject, body)
-    print(f"[Notifier] PR #{pr_number} — notified {NOTIFY_EMAIL} (score: {score}/10)")
-    duration_ms = (time.perf_counter() - t0) * 1000
-    log_event("notify", trace_id, pr_number=pr_number, sent=True, duration_ms=round(duration_ms, 2))
-    record_stage("notify", duration_ms)
 
 
 def main():
@@ -199,8 +218,9 @@ def main():
 
             event = json.loads(msg.value().decode("utf-8"))
             trace_id = extract_trace_id(msg)
+            otel_context = extract_otel_context(msg)
             try:
-                process_event(event, trace_id)
+                process_event(event, trace_id, otel_context)
             except Exception as e:
                 print(f"[Notifier] Error processing PR #{event.get('pr_number')}: {e}")
                 STAGE_TOTAL.labels(service="notifier", stage="notify", outcome="error").inc()

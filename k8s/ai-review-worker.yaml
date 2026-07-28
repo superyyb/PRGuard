@@ -36,6 +36,8 @@ spec:
                 secretKeyRef:
                   name: prguard-secrets
                   key: ANTHROPIC_API_KEY
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger-service:4318"
           livenessProbe:
             exec:
               # 检查 /tmp/healthy 在 120 秒内是否被更新过
