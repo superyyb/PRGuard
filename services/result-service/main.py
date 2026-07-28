@@ -8,6 +8,11 @@ import time
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, start_http_server
+from opentelemetry import propagate, trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from database import (
     init_db,
@@ -46,6 +51,12 @@ DLQ_MESSAGES = Counter(
     ["error_type"],
 )
 
+OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+provider = TracerProvider(resource=Resource.create({"service.name": "result-service"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces")))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("result-service")
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "result-service", "trace_id": trace_id, "stage": stage, **fields}))
@@ -61,6 +72,11 @@ def extract_trace_id(msg) -> str:
         if key == "trace_id":
             return value.decode()
     return "unknown"
+
+
+def extract_otel_context(msg):
+    carrier = {k: v.decode() for k, v in (msg.headers() or [])}
+    return propagate.extract(carrier)
 
 
 # Lazy-initialized DLQ producer, shared across threads
@@ -93,7 +109,7 @@ def send_to_dlq(raw_message: str, error: str, error_type: str, attempts: int, tr
     DLQ_MESSAGES.labels(error_type=error_type).inc()
 
 
-def process_with_retry(handler, data: dict, raw: str, trace_id: str = "unknown", max_retries: int = 3):
+def process_with_retry(handler, data: dict, raw: str, trace_id: str = "unknown", otel_context=None, max_retries: int = 3):
     """
     区分暂时失败和永久失败：
     - KeyError / ValueError → 永久失败（消息结构错误），直接进 DLQ，不重试
@@ -103,7 +119,7 @@ def process_with_retry(handler, data: dict, raw: str, trace_id: str = "unknown",
         try:
             print(f"[Result Service] Processing PR #{data.get('pr_number', '?')} "
                   f"attempt {attempt}/{max_retries}")
-            handler(data, trace_id)
+            handler(data, trace_id, otel_context)
             print(f"[Result Service] ✅ PR #{data.get('pr_number', '?')} processed successfully")
             return
         except (KeyError, ValueError) as e:
@@ -146,6 +162,7 @@ def consume_loop(topic: str, group_id: str, handler):
 
             raw = msg.value().decode("utf-8")
             trace_id = extract_trace_id(msg)
+            otel_context = extract_otel_context(msg)
 
             # JSON 解析失败 = 永久失败，直接进 DLQ
             try:
@@ -155,56 +172,62 @@ def consume_loop(topic: str, group_id: str, handler):
                 send_to_dlq(raw, str(e), "PermanentFailure", 1, trace_id)
                 continue
 
-            process_with_retry(handler, data, raw, trace_id)
+            process_with_retry(handler, data, raw, trace_id, otel_context)
     finally:
         consumer.close()
 
 
-def handle_ai_result(data: dict, trace_id: str = "unknown"):
-    t0 = time.perf_counter()
-    pr_number = data["pr_number"]
-    repo = data["repo_full_name"]
-    head_sha = data["head_sha"]
-    review = data["review"]
+def handle_ai_result(data: dict, trace_id: str = "unknown", otel_context=None):
+    with tracer.start_as_current_span("result_publish_ai", context=otel_context) as span:
+        span.set_attribute("prguard.trace_id", trace_id)
 
-    # 幂等性检查：comment 已发过则跳过
-    if is_ai_comment_posted(repo, pr_number, head_sha):
-        print(f"[Result Service] PR #{pr_number} ({head_sha[:7]}) already reviewed, skipping")
-        return
+        t0 = time.perf_counter()
+        pr_number = data["pr_number"]
+        repo = data["repo_full_name"]
+        head_sha = data["head_sha"]
+        review = data["review"]
 
-    # 先存数据库，再发 comment
-    save_ai_review(repo, pr_number, head_sha, review)
-    comment = format_ai_comment(review)
-    post_pr_comment(repo, pr_number, comment)
-    mark_ai_comment_posted(repo, pr_number, head_sha)
-    print(f"[Result Service] AI review posted and saved for PR #{pr_number}")
-    duration_ms = (time.perf_counter() - t0) * 1000
-    log_event("result_publish_ai", trace_id, pr_number=pr_number, duration_ms=round(duration_ms, 2))
-    record_stage("result_publish_ai", duration_ms)
+        # 幂等性检查：comment 已发过则跳过
+        if is_ai_comment_posted(repo, pr_number, head_sha):
+            print(f"[Result Service] PR #{pr_number} ({head_sha[:7]}) already reviewed, skipping")
+            return
+
+        # 先存数据库，再发 comment
+        save_ai_review(repo, pr_number, head_sha, review)
+        comment = format_ai_comment(review)
+        post_pr_comment(repo, pr_number, comment)
+        mark_ai_comment_posted(repo, pr_number, head_sha)
+        print(f"[Result Service] AI review posted and saved for PR #{pr_number}")
+        duration_ms = (time.perf_counter() - t0) * 1000
+        log_event("result_publish_ai", trace_id, pr_number=pr_number, duration_ms=round(duration_ms, 2))
+        record_stage("result_publish_ai", duration_ms)
 
 
-def handle_security_result(data: dict, trace_id: str = "unknown"):
-    t0 = time.perf_counter()
-    pr_number = data["pr_number"]
-    repo = data["repo_full_name"]
-    head_sha = data["head_sha"]
-    findings = data["findings"]
-    passed = data["passed"]
+def handle_security_result(data: dict, trace_id: str = "unknown", otel_context=None):
+    with tracer.start_as_current_span("result_publish_security", context=otel_context) as span:
+        span.set_attribute("prguard.trace_id", trace_id)
 
-    # 幂等性检查：comment 已发过则跳过
-    if is_security_comment_posted(repo, pr_number, head_sha):
-        print(f"[Result Service] PR #{pr_number} ({head_sha[:7]}) security scan already posted, skipping")
-        return
+        t0 = time.perf_counter()
+        pr_number = data["pr_number"]
+        repo = data["repo_full_name"]
+        head_sha = data["head_sha"]
+        findings = data["findings"]
+        passed = data["passed"]
 
-    # 先存数据库，再发 comment
-    save_security_scan(repo, pr_number, head_sha, findings, passed)
-    comment = format_security_comment(findings, passed)
-    post_pr_comment(repo, pr_number, comment)
-    mark_security_comment_posted(repo, pr_number, head_sha)
-    print(f"[Result Service] Security scan posted and saved for PR #{pr_number}")
-    duration_ms = (time.perf_counter() - t0) * 1000
-    log_event("result_publish_security", trace_id, pr_number=pr_number, duration_ms=round(duration_ms, 2))
-    record_stage("result_publish_security", duration_ms)
+        # 幂等性检查：comment 已发过则跳过
+        if is_security_comment_posted(repo, pr_number, head_sha):
+            print(f"[Result Service] PR #{pr_number} ({head_sha[:7]}) security scan already posted, skipping")
+            return
+
+        # 先存数据库，再发 comment
+        save_security_scan(repo, pr_number, head_sha, findings, passed)
+        comment = format_security_comment(findings, passed)
+        post_pr_comment(repo, pr_number, comment)
+        mark_security_comment_posted(repo, pr_number, head_sha)
+        print(f"[Result Service] Security scan posted and saved for PR #{pr_number}")
+        duration_ms = (time.perf_counter() - t0) * 1000
+        log_event("result_publish_security", trace_id, pr_number=pr_number, duration_ms=round(duration_ms, 2))
+        record_stage("result_publish_security", duration_ms)
 
 
 def main():
