@@ -7,15 +7,31 @@ import time
 import httpx
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram, start_http_server
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("security-scanner")
 
+STAGE_DURATION = Histogram(
+    "pr_stage_duration_seconds", "Duration of each pipeline stage",
+    ["service", "stage"],
+    buckets=(0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30),
+)
+STAGE_TOTAL = Counter(
+    "pr_stage_total", "Count of pipeline stage outcomes",
+    ["service", "stage", "outcome"],
+)
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "security-scanner", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def record_stage(stage: str, duration_ms: float, outcome: str = "success"):
+    STAGE_DURATION.labels(service="security-scanner", stage=stage).observe(duration_ms / 1000)
+    STAGE_TOTAL.labels(service="security-scanner", stage=stage, outcome=outcome).inc()
 
 
 def extract_trace_id(msg) -> str:
@@ -96,7 +112,9 @@ def process_event(event: dict, trace_id: str = "unknown"):
 
     t_diff = time.perf_counter()
     diff = fetch_pr_diff(event["diff_url"])
-    log_event("fetch_diff", trace_id, pr_number=pr_number, duration_ms=round((time.perf_counter() - t_diff) * 1000, 2))
+    diff_ms = (time.perf_counter() - t_diff) * 1000
+    log_event("fetch_diff", trace_id, pr_number=pr_number, duration_ms=round(diff_ms, 2))
+    record_stage("fetch_diff", diff_ms)
 
     findings = scan_diff(diff)
 
@@ -122,10 +140,13 @@ def process_event(event: dict, trace_id: str = "unknown"):
     )
     producer.flush()
 
-    log_event("security_scan", trace_id, pr_number=pr_number, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
+    total_ms = (time.perf_counter() - t0) * 1000
+    log_event("security_scan", trace_id, pr_number=pr_number, duration_ms=round(total_ms, 2))
+    record_stage("security_scan", total_ms)
 
 
 def main():
+    start_http_server(9100)
     consumer.subscribe(["pr-events"])
     print("[Security Scanner] Started, waiting for PR events...")
 
@@ -144,6 +165,7 @@ def main():
                 process_event(event, trace_id)
             except Exception as e:
                 print(f"[Security Scanner] Error processing PR #{event.get('pr_number')}: {e}")
+                STAGE_TOTAL.labels(service="security-scanner", stage="security_scan", outcome="error").inc()
     finally:
         consumer.close()
 

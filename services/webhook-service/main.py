@@ -10,10 +10,12 @@ from confluent_kafka import Producer
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Histogram, make_asgi_app
 
 load_dotenv()
 
 app = FastAPI(title="Webhook Service")
+app.mount("/metrics", make_asgi_app())
 
 WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -23,9 +25,24 @@ producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("webhook-service")
 
+STAGE_DURATION = Histogram(
+    "pr_stage_duration_seconds", "Duration of each pipeline stage",
+    ["service", "stage"],
+    buckets=(0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30),
+)
+STAGE_TOTAL = Counter(
+    "pr_stage_total", "Count of pipeline stage outcomes",
+    ["service", "stage", "outcome"],
+)
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "webhook-service", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def record_stage(stage: str, duration_ms: float, outcome: str = "success"):
+    STAGE_DURATION.labels(service="webhook-service", stage=stage).observe(duration_ms / 1000)
+    STAGE_TOTAL.labels(service="webhook-service", stage=stage, outcome=outcome).inc()
 
 
 def verify_signature(payload: bytes, signature: str) -> bool:
@@ -100,6 +117,7 @@ async def github_webhook(
         repo=data["repository"]["full_name"],
         duration_ms=round(duration_ms, 2),
     )
+    record_stage("webhook_publish", duration_ms)
     return JSONResponse({"status": "published", "pr_number": pr["number"]})
 
 
