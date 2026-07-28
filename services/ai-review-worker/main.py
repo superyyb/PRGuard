@@ -17,6 +17,8 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+from kafka_reliability import process_with_retry, send_to_dlq
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -80,6 +82,7 @@ consumer = Consumer({
     "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
     "group.id": "ai-review-group",        # 独立 consumer group
     "auto.offset.reset": "earliest",
+    "enable.auto.commit": False,          # 手动 commit：只有处理到终态才移动 offset
 })
 
 producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
@@ -295,14 +298,25 @@ def main():
                 print(f"[AI Worker] Consumer error: {msg.error()}")
                 continue
 
-            event = json.loads(msg.value().decode("utf-8"))
+            raw = msg.value().decode("utf-8")
             trace_id = extract_trace_id(msg)
             otel_context = extract_otel_context(msg)
+
             try:
-                process_event(event, trace_id, otel_context)
-            except Exception as e:
-                print(f"[AI Worker] Error processing PR #{event.get('pr_number')}: {e}")
-                STAGE_TOTAL.labels(service="ai-review-worker", stage="ai_review", outcome="error").inc()
+                event = json.loads(raw)
+            except json.JSONDecodeError as e:
+                print(f"[AI Worker] Invalid JSON: {e}")
+                send_to_dlq(KAFKA_BOOTSTRAP_SERVERS, "ai-review-worker", raw, str(e),
+                            "PermanentFailure", 1, trace_id)
+                consumer.commit(msg)
+                continue
+
+            done = process_with_retry(
+                "ai-review-worker", KAFKA_BOOTSTRAP_SERVERS,
+                process_event, event, raw, trace_id, otel_context,
+            )
+            if done:
+                consumer.commit(msg)
     finally:
         consumer.close()
 

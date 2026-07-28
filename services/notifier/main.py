@@ -15,6 +15,9 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+from database import init_db, is_email_sent, mark_email_sent
+from kafka_reliability import process_with_retry, send_to_dlq
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -66,6 +69,7 @@ consumer = Consumer({
     "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
     "group.id": "notifier-group",
     "auto.offset.reset": "earliest",
+    "enable.auto.commit": False,   # 手动 commit：只有处理到终态才移动 offset
 })
 
 
@@ -171,6 +175,7 @@ def send_email(subject: str, body: str, max_retries: int = 3):
                 time.sleep(2 ** attempt)  # 指数退避: 2s, 4s
             else:
                 print(f"[Notifier] Failed to send email after {max_retries} attempts")
+                raise
 
 
 def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
@@ -178,13 +183,22 @@ def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
         span.set_attribute("prguard.trace_id", trace_id)
 
         t0 = time.perf_counter()
-        pr_number = event.get("pr_number")
+        pr_number = event["pr_number"]
         repo = event.get("repo_full_name", "")
+        head_sha = event.get("head_sha", "")
         html_url = event.get("html_url", "")
         review = event.get("review", {})
 
         if not should_notify(review):
             print(f"[Notifier] PR #{pr_number} score {review.get('score')}/10 — no notification needed")
+            duration_ms = (time.perf_counter() - t0) * 1000
+            log_event("notify", trace_id, pr_number=pr_number, sent=False, duration_ms=round(duration_ms, 2))
+            record_stage("notify", duration_ms)
+            return
+
+        # 幂等性检查：这个 commit 的报警邮件已发过则跳过，避免重复消费导致重复报警
+        if is_email_sent(repo, pr_number, head_sha):
+            print(f"[Notifier] PR #{pr_number} ({head_sha[:7]}) already notified, skipping")
             duration_ms = (time.perf_counter() - t0) * 1000
             log_event("notify", trace_id, pr_number=pr_number, sent=False, duration_ms=round(duration_ms, 2))
             record_stage("notify", duration_ms)
@@ -196,6 +210,7 @@ def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
         body = build_email_body(pr_number, repo, html_url, review)
 
         send_email(subject, body)
+        mark_email_sent(repo, pr_number, head_sha)
         print(f"[Notifier] PR #{pr_number} — notified {NOTIFY_EMAIL} (score: {score}/10)")
         duration_ms = (time.perf_counter() - t0) * 1000
         log_event("notify", trace_id, pr_number=pr_number, sent=True, duration_ms=round(duration_ms, 2))
@@ -204,6 +219,7 @@ def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
 
 def main():
     start_http_server(9100)
+    init_db()
     consumer.subscribe(["ai-results"])
     print("[Notifier] Started, waiting for AI review results...")
 
@@ -216,14 +232,25 @@ def main():
                 print(f"[Notifier] Consumer error: {msg.error()}")
                 continue
 
-            event = json.loads(msg.value().decode("utf-8"))
+            raw = msg.value().decode("utf-8")
             trace_id = extract_trace_id(msg)
             otel_context = extract_otel_context(msg)
+
             try:
-                process_event(event, trace_id, otel_context)
-            except Exception as e:
-                print(f"[Notifier] Error processing PR #{event.get('pr_number')}: {e}")
-                STAGE_TOTAL.labels(service="notifier", stage="notify", outcome="error").inc()
+                event = json.loads(raw)
+            except json.JSONDecodeError as e:
+                print(f"[Notifier] Invalid JSON: {e}")
+                send_to_dlq(KAFKA_BOOTSTRAP_SERVERS, "notifier", raw, str(e),
+                            "PermanentFailure", 1, trace_id)
+                consumer.commit(msg)
+                continue
+
+            done = process_with_retry(
+                "notifier", KAFKA_BOOTSTRAP_SERVERS,
+                process_event, event, raw, trace_id, otel_context,
+            )
+            if done:
+                consumer.commit(msg)
     finally:
         consumer.close()
 

@@ -1,11 +1,10 @@
-import datetime
 import json
 import logging
 import os
 import threading
 import time
 
-from confluent_kafka import Consumer, Producer
+from confluent_kafka import Consumer
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, start_http_server
 from opentelemetry import propagate, trace
@@ -28,11 +27,11 @@ from github_client import (
     format_security_comment,
     post_pr_comment,
 )
+from kafka_reliability import process_with_retry, send_to_dlq
 
 load_dotenv()
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-DLQ_TOPIC = "pr-events-dlq"
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("result-service")
@@ -45,10 +44,6 @@ STAGE_DURATION = Histogram(
 STAGE_TOTAL = Counter(
     "pr_stage_total", "Count of pipeline stage outcomes",
     ["service", "stage", "outcome"],
-)
-DLQ_MESSAGES = Counter(
-    "dlq_messages_total", "Messages sent to the dead letter queue",
-    ["error_type"],
 )
 
 OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
@@ -79,70 +74,12 @@ def extract_otel_context(msg):
     return propagate.extract(carrier)
 
 
-# Lazy-initialized DLQ producer, shared across threads
-_dlq_producer = None
-_dlq_lock = threading.Lock()
-
-
-def get_dlq_producer() -> Producer:
-    global _dlq_producer
-    with _dlq_lock:
-        if _dlq_producer is None:
-            _dlq_producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
-    return _dlq_producer
-
-
-def send_to_dlq(raw_message: str, error: str, error_type: str, attempts: int, trace_id: str = "unknown"):
-    """把失败的消息发到 Dead Letter Queue，保留原始内容 + 错误信息。"""
-    producer = get_dlq_producer()
-    dlq_payload = json.dumps({
-        "original_message": raw_message,
-        "error": error,
-        "error_type": error_type,
-        "attempts": attempts,
-        "trace_id": trace_id,
-        "failed_at": datetime.datetime.utcnow().isoformat(),
-    })
-    producer.produce(DLQ_TOPIC, dlq_payload.encode("utf-8"))
-    producer.flush()
-    print(f"[Result Service] 📨 Sent to DLQ ({error_type}, {attempts} attempts): {error}")
-    DLQ_MESSAGES.labels(error_type=error_type).inc()
-
-
-def process_with_retry(handler, data: dict, raw: str, trace_id: str = "unknown", otel_context=None, max_retries: int = 3):
-    """
-    区分暂时失败和永久失败：
-    - KeyError / ValueError → 永久失败（消息结构错误），直接进 DLQ，不重试
-    - 其他 Exception      → 暂时失败（网络/API 超时），指数退避重试，耗尽后进 DLQ
-    """
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"[Result Service] Processing PR #{data.get('pr_number', '?')} "
-                  f"attempt {attempt}/{max_retries}")
-            handler(data, trace_id, otel_context)
-            print(f"[Result Service] ✅ PR #{data.get('pr_number', '?')} processed successfully")
-            return
-        except (KeyError, ValueError) as e:
-            # 永久失败：消息本身有问题，重试也没用
-            print(f"[Result Service] ❌ Permanent failure: {e}")
-            send_to_dlq(raw, str(e), "PermanentFailure", attempt, trace_id)
-            return
-        except Exception as e:
-            if attempt < max_retries:
-                wait = 2 ** attempt  # 2s → 4s
-                print(f"[Result Service] ⚠️ Attempt {attempt} failed: {e}, "
-                      f"retrying in {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"[Result Service] ❌ All {max_retries} retries exhausted: {e}")
-                send_to_dlq(raw, str(e), "TemporaryFailure", attempt, trace_id)
-
-
 def make_consumer(group_id: str) -> Consumer:
     return Consumer({
         "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
         "group.id": group_id,
         "auto.offset.reset": "earliest",
+        "enable.auto.commit": False,   # 手动 commit：只有处理到终态才移动 offset
     })
 
 
@@ -168,11 +105,18 @@ def consume_loop(topic: str, group_id: str, handler):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError as e:
-                print(f"[Result Service] ❌ Invalid JSON: {e}")
-                send_to_dlq(raw, str(e), "PermanentFailure", 1, trace_id)
+                print(f"[Result Service] Invalid JSON: {e}")
+                send_to_dlq(KAFKA_BOOTSTRAP_SERVERS, "result-service", raw, str(e),
+                            "PermanentFailure", 1, trace_id)
+                consumer.commit(msg)
                 continue
 
-            process_with_retry(handler, data, raw, trace_id, otel_context)
+            done = process_with_retry(
+                "result-service", KAFKA_BOOTSTRAP_SERVERS,
+                handler, data, raw, trace_id, otel_context,
+            )
+            if done:
+                consumer.commit(msg)
     finally:
         consumer.close()
 
