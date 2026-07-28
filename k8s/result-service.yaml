@@ -12,6 +12,9 @@ spec:
     metadata:
       labels:
         app: result-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
     spec:
       containers:
         - name: result-service

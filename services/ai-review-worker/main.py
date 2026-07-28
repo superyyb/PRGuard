@@ -9,15 +9,31 @@ import anthropic
 import httpx
 from confluent_kafka import Consumer, Producer
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram, start_http_server
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("ai-review-worker")
 
+STAGE_DURATION = Histogram(
+    "pr_stage_duration_seconds", "Duration of each pipeline stage",
+    ["service", "stage"],
+    buckets=(0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30),
+)
+STAGE_TOTAL = Counter(
+    "pr_stage_total", "Count of pipeline stage outcomes",
+    ["service", "stage", "outcome"],
+)
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "ai-review-worker", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def record_stage(stage: str, duration_ms: float, outcome: str = "success"):
+    STAGE_DURATION.labels(service="ai-review-worker", stage=stage).observe(duration_ms / 1000)
+    STAGE_TOTAL.labels(service="ai-review-worker", stage=stage, outcome=outcome).inc()
 
 
 def extract_trace_id(msg) -> str:
@@ -197,6 +213,7 @@ def process_event(event: dict, trace_id: str = "unknown"):
     context = build_review_context(files)
     context_ms = (time.perf_counter() - t_context) * 1000
     log_event("build_context", trace_id, pr_number=pr_number, duration_ms=round(context_ms, 2))
+    record_stage("build_context", context_ms)
 
     if not context.strip():
         print(f"[AI Worker] PR #{pr_number} has no reviewable changes, skipping")
@@ -206,6 +223,7 @@ def process_event(event: dict, trace_id: str = "unknown"):
     review = analyze_with_ai(event["title"], context)
     ai_ms = (time.perf_counter() - t_ai) * 1000
     log_event("claude_call", trace_id, pr_number=pr_number, duration_ms=round(ai_ms, 2))
+    record_stage("claude_call", ai_ms)
     print(f"[AI Worker] PR #{pr_number} score: {review.get('score')}/10")
 
     result = {
@@ -228,9 +246,11 @@ def process_event(event: dict, trace_id: str = "unknown"):
 
     total_ms = (time.perf_counter() - t0) * 1000
     log_event("ai_review", trace_id, pr_number=pr_number, duration_ms=round(total_ms, 2))
+    record_stage("ai_review", total_ms)
 
 
 def main():
+    start_http_server(9100)
     consumer.subscribe(["pr-events"])
     READY_FILE.touch()   # Readiness: 成功订阅 Kafka topic，可以接收消息了
     print("[AI Worker] Started, waiting for PR events...")
@@ -251,6 +271,7 @@ def main():
                 process_event(event, trace_id)
             except Exception as e:
                 print(f"[AI Worker] Error processing PR #{event.get('pr_number')}: {e}")
+                STAGE_TOTAL.labels(service="ai-review-worker", stage="ai_review", outcome="error").inc()
     finally:
         consumer.close()
 

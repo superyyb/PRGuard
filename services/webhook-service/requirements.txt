@@ -4,3 +4,4 @@ confluent-kafka==2.4.0
 pydantic==2.7.4
 python-dotenv==1.0.1
 httpx==0.27.0
+prometheus-client==0.20.0

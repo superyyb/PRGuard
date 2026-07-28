@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: prguard
+    static_configs:
+      - targets:
+          - webhook-service:8000
+          - ai-review-worker:9100
+          - security-scanner:9100
+          - result-service:9100
+          - notifier:9100

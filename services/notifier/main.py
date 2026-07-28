@@ -8,15 +8,31 @@ from email.mime.text import MIMEText
 
 from confluent_kafka import Consumer
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram, start_http_server
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("notifier")
 
+STAGE_DURATION = Histogram(
+    "pr_stage_duration_seconds", "Duration of each pipeline stage",
+    ["service", "stage"],
+    buckets=(0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30),
+)
+STAGE_TOTAL = Counter(
+    "pr_stage_total", "Count of pipeline stage outcomes",
+    ["service", "stage", "outcome"],
+)
+
 
 def log_event(stage: str, trace_id: str, **fields):
     logger.info(json.dumps({"service": "notifier", "trace_id": trace_id, "stage": stage, **fields}))
+
+
+def record_stage(stage: str, duration_ms: float, outcome: str = "success"):
+    STAGE_DURATION.labels(service="notifier", stage=stage).observe(duration_ms / 1000)
+    STAGE_TOTAL.labels(service="notifier", stage=stage, outcome=outcome).inc()
 
 
 def extract_trace_id(msg) -> str:
@@ -150,7 +166,9 @@ def process_event(event: dict, trace_id: str = "unknown"):
 
     if not should_notify(review):
         print(f"[Notifier] PR #{pr_number} score {review.get('score')}/10 — no notification needed")
-        log_event("notify", trace_id, pr_number=pr_number, sent=False, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
+        duration_ms = (time.perf_counter() - t0) * 1000
+        log_event("notify", trace_id, pr_number=pr_number, sent=False, duration_ms=round(duration_ms, 2))
+        record_stage("notify", duration_ms)
         return
 
     score = review.get("score", 0)
@@ -160,10 +178,13 @@ def process_event(event: dict, trace_id: str = "unknown"):
 
     send_email(subject, body)
     print(f"[Notifier] PR #{pr_number} — notified {NOTIFY_EMAIL} (score: {score}/10)")
-    log_event("notify", trace_id, pr_number=pr_number, sent=True, duration_ms=round((time.perf_counter() - t0) * 1000, 2))
+    duration_ms = (time.perf_counter() - t0) * 1000
+    log_event("notify", trace_id, pr_number=pr_number, sent=True, duration_ms=round(duration_ms, 2))
+    record_stage("notify", duration_ms)
 
 
 def main():
+    start_http_server(9100)
     consumer.subscribe(["ai-results"])
     print("[Notifier] Started, waiting for AI review results...")
 
@@ -182,6 +203,7 @@ def main():
                 process_event(event, trace_id)
             except Exception as e:
                 print(f"[Notifier] Error processing PR #{event.get('pr_number')}: {e}")
+                STAGE_TOTAL.labels(service="notifier", stage="notify", outcome="error").inc()
     finally:
         consumer.close()
 
