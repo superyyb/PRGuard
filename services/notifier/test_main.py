@@ -41,13 +41,26 @@ def test_build_email_body_contains_pr_info():
     assert "4/10" in body
 
 
+@patch("main.mark_email_sent")
+@patch("main.is_email_sent", return_value=False)
 @patch("main.send_email")
-def test_process_event_sends_email_for_low_score(mock_send):
+def test_process_event_sends_email_for_low_score(mock_send, mock_is_sent, mock_mark):
     process_event(MOCK_EVENT)
     mock_send.assert_called_once()
+    mock_mark.assert_called_once()
     subject = mock_send.call_args[0][0]
     assert "PR #5" in subject
     assert "4/10" in subject
+
+
+@patch("main.mark_email_sent")
+@patch("main.is_email_sent", return_value=True)
+@patch("main.send_email")
+def test_process_event_skips_duplicate_notification(mock_send, mock_is_sent, mock_mark):
+    """幂等性检查：这个 commit 已经通知过则跳过，避免消息重复投递导致重复报警"""
+    process_event(MOCK_EVENT)
+    mock_send.assert_not_called()
+    mock_mark.assert_not_called()
 
 
 @patch("main.send_email")
