@@ -69,6 +69,21 @@ def inject_otel_headers(headers: list) -> list:
     headers.extend((k, v.encode()) for k, v in carrier.items())
     return headers
 
+
+_has_assignment = False
+
+
+def on_assign(consumer, partitions):
+    global _has_assignment
+    _has_assignment = True
+    print(f"[AI Worker] Partitions assigned: {partitions}")
+
+
+def on_revoke(consumer, partitions):
+    global _has_assignment
+    _has_assignment = False
+    print(f"[AI Worker] Partitions revoked: {partitions}")
+
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -284,13 +299,16 @@ def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
 
 def main():
     start_http_server(9100)
-    consumer.subscribe(["pr-events"])
+    consumer.subscribe(["pr-events"], on_assign=on_assign, on_revoke=on_revoke)
     READY_FILE.touch()   # Readiness: 成功订阅 Kafka topic，可以接收消息了
     print("[AI Worker] Started, waiting for PR events...")
 
     try:
         while True:
-            HEALTHY_FILE.touch()  # Liveness: 每次 poll 前更新时间戳，证明循环没卡死
+            # Liveness: 只有真的持有 partition 分配时才更新时间戳——
+            # 之前只要循环还在转就 touch，consumer 卡在 rejoin group 时探针也测不出来
+            if _has_assignment:
+                HEALTHY_FILE.touch()
             msg = consumer.poll(timeout=1.0)
             if msg is None:
                 continue

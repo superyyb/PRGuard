@@ -33,6 +33,24 @@ spec:
                   key: GITHUB_TOKEN
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://jaeger-service:4318"
+          livenessProbe:
+            exec:
+              # 检查 /tmp/healthy 在 120 秒内是否被更新过
+              # 只有真的持有 partition 分配时才会更新，consumer 卡在 rejoin group 时探针会失败并触发重启
+              command:
+                - /bin/sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy) )) -lt 120"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              # 检查 /tmp/ready 是否存在，存在说明已成功订阅 Kafka topic
+              command: ["cat", "/tmp/ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
               cpu: "50m"
