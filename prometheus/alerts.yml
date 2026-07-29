@@ -1,0 +1,20 @@
+groups:
+  - name: dlq
+    rules:
+      - alert: DLQPermanentFailureBurst
+        expr: increase(dlq_messages_total{error_type="PermanentFailure"}[10m]) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} 短时间内出现多条永久失败消息"
+          description: "10分钟内 {{ $value }} 条 PermanentFailure，可能是事件 schema 变更或版本 skew"
+
+      - alert: DLQTemporaryFailureExhausted
+        expr: increase(dlq_messages_total{error_type="TemporaryFailure"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} 重试耗尽，疑似外部依赖故障"
+          description: "{{ $labels.service }} 有消息重试3次后仍失败，可能是 Claude/GitHub API 或 SMTP 出问题"
