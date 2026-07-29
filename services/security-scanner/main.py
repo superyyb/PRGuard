@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import pathlib
 import re
 import time
 
@@ -67,8 +68,26 @@ def inject_otel_headers(headers: list) -> list:
     headers.extend((k, v.encode()) for k, v in carrier.items())
     return headers
 
+
+_has_assignment = False
+
+
+def on_assign(consumer, partitions):
+    global _has_assignment
+    _has_assignment = True
+    print(f"[Security Scanner] Partitions assigned: {partitions}")
+
+
+def on_revoke(consumer, partitions):
+    global _has_assignment
+    _has_assignment = False
+    print(f"[Security Scanner] Partitions revoked: {partitions}")
+
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+HEALTHY_FILE = pathlib.Path("/tmp/healthy")  # liveness: 是否持有 partition 分配
+READY_FILE = pathlib.Path("/tmp/ready")      # readiness: 已连上 Kafka
 
 consumer = Consumer({
     "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
@@ -79,17 +98,18 @@ consumer = Consumer({
 
 producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
 
-# 安全规则：(规则名, 正则, 严重级别, 说明)
-SECURITY_RULES = [
-    ("hardcoded_password", r'(?i)(password|passwd|pwd)\s*=\s*["\'][^"\']{4,}["\']', "high", "Hardcoded password detected"),
-    ("hardcoded_secret",   r'(?i)(secret|api_key|apikey|token)\s*=\s*["\'][^"\']{8,}["\']', "high", "Hardcoded secret or API key detected"),
-    ("hardcoded_aws_key",  r'AKIA[0-9A-Z]{16}', "high", "Hardcoded AWS access key detected"),
-    ("sql_injection",      r'(?i)(execute|cursor\.execute)\s*\(\s*["\'].*%s', "high", "Potential SQL injection via string formatting"),
-    ("eval_usage",         r'\beval\s*\(', "medium", "Use of eval() is dangerous"),
-    ("shell_injection",    r'(?i)(os\.system|subprocess\.call|subprocess\.Popen)\s*\(.*\+', "medium", "Potential shell injection via string concatenation"),
-    ("debug_enabled",      r'(?i)DEBUG\s*=\s*True', "low", "Debug mode enabled in code"),
-    ("print_sensitive",    r'(?i)print\s*\(.*(?:password|token|secret)', "low", "Potentially printing sensitive data"),
-]
+DEFAULT_RULES_PATH = os.path.join(os.path.dirname(__file__), "security_rules.json")
+SECURITY_RULES_PATH = os.getenv("SECURITY_RULES_PATH", DEFAULT_RULES_PATH)
+
+
+def load_security_rules(path: str) -> list[tuple]:
+    """从 JSON 文件加载安全规则：[(规则名, 正则, 严重级别, 说明), ...]"""
+    with open(path) as f:
+        rules = json.load(f)
+    return [(r["name"], r["pattern"], r["severity"], r["message"]) for r in rules]
+
+
+SECURITY_RULES = load_security_rules(SECURITY_RULES_PATH)
 
 
 def fetch_pr_diff(diff_url: str) -> str:
@@ -178,11 +198,15 @@ def process_event(event: dict, trace_id: str = "unknown", otel_context=None):
 
 def main():
     start_http_server(9100)
-    consumer.subscribe(["pr-events"])
+    consumer.subscribe(["pr-events"], on_assign=on_assign, on_revoke=on_revoke)
+    READY_FILE.touch()   # Readiness: 成功订阅 Kafka topic，可以接收消息了
     print("[Security Scanner] Started, waiting for PR events...")
 
     try:
         while True:
+            # Liveness: 只有真的持有 partition 分配时才更新时间戳
+            if _has_assignment:
+                HEALTHY_FILE.touch()
             msg = consumer.poll(timeout=1.0)
             if msg is None:
                 continue

@@ -69,6 +69,8 @@ services:
 
   security-scanner:
     build: ./services/security-scanner
+    volumes:
+      - ./services/security-scanner/security_rules.json:/app/security_rules.json
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       GITHUB_TOKEN: ${GITHUB_TOKEN}

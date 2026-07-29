@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import pathlib
 import threading
 import time
 
@@ -14,7 +15,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from database import (
-    init_db,
+    run_migrations,
     save_ai_review,
     save_security_scan,
     is_ai_comment_posted,
@@ -74,6 +75,28 @@ def extract_otel_context(msg):
     return propagate.extract(carrier)
 
 
+HEALTHY_FILE = pathlib.Path("/tmp/healthy")  # liveness: 两个 consumer 是否都持有 partition 分配
+READY_FILE = pathlib.Path("/tmp/ready")      # readiness: 两个 consumer 线程都已启动
+
+# 两个 consumer 线程各消费一个 topic，各自独立跟踪是否持有 partition 分配——
+# 任一个卡在 rejoin group 都要让存活文件停止更新
+_group_health = {"ai-results": False, "security-results": False}
+
+
+def make_on_assign(topic: str):
+    def on_assign(consumer, partitions):
+        _group_health[topic] = True
+        print(f"[Result Service] {topic}: partitions assigned: {partitions}")
+    return on_assign
+
+
+def make_on_revoke(topic: str):
+    def on_revoke(consumer, partitions):
+        _group_health[topic] = False
+        print(f"[Result Service] {topic}: partitions revoked: {partitions}")
+    return on_revoke
+
+
 def make_consumer(group_id: str) -> Consumer:
     return Consumer({
         "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
@@ -85,11 +108,14 @@ def make_consumer(group_id: str) -> Consumer:
 
 def consume_loop(topic: str, group_id: str, handler):
     consumer = make_consumer(group_id)
-    consumer.subscribe([topic])
+    consumer.subscribe([topic], on_assign=make_on_assign(topic), on_revoke=make_on_revoke(topic))
     print(f"[Result Service] Listening on {topic} ({group_id})")
 
     try:
         while True:
+            # Liveness: 两个 consumer 都持有 partition 分配才算健康
+            if all(_group_health.values()):
+                HEALTHY_FILE.touch()
             msg = consumer.poll(timeout=1.0)
             if msg is None:
                 continue
@@ -188,10 +214,11 @@ def main():
         daemon=True,
     )
 
-    init_db()
+    run_migrations()
 
     ai_thread.start()
     security_thread.start()
+    READY_FILE.touch()   # Readiness: 两个消费线程都已启动
 
     print("[Result Service] Started both consumers")
     ai_thread.join()

@@ -38,6 +38,24 @@ spec:
                   key: GITHUB_TOKEN
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://jaeger-service:4318"
+          livenessProbe:
+            exec:
+              # 检查 /tmp/healthy 在 120 秒内是否被更新过
+              # 两个 consumer 线程都持有 partition 分配才会更新，任一个卡住都会触发重启
+              command:
+                - /bin/sh
+                - -c
+                - "test $(( $(date +%s) - $(stat -c %Y /tmp/healthy) )) -lt 120"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              # 检查 /tmp/ready 是否存在，存在说明两个消费线程都已启动
+              command: ["cat", "/tmp/ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
               cpu: "50m"

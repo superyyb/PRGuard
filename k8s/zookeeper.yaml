@@ -8,7 +8,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi
+      storage: 2Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -34,9 +34,20 @@ spec:
           env:
             - name: ZOOKEEPER_CLIENT_PORT
               value: "2181"
+            # dataLogDir 之前没有持久化，Pod 重建就丢事务日志（包括 Kafka 的 cluster ID
+            # 注册记录），导致 cluster ID 反复漂移；现在真正持久化之后，日志会无限增长，
+            # 必须配 autopurge 定期清理旧快照/日志，否则迟早写满 PVC
+            - name: ZOOKEEPER_AUTOPURGE_SNAP_RETAIN_COUNT
+              value: "3"
+            - name: ZOOKEEPER_AUTOPURGE_PURGE_INTERVAL
+              value: "24"
           volumeMounts:
             - name: zookeeper-data
               mountPath: /var/lib/zookeeper/data
+              subPath: data
+            - name: zookeeper-data
+              mountPath: /var/lib/zookeeper/log
+              subPath: log
       volumes:
         - name: zookeeper-data
           persistentVolumeClaim:

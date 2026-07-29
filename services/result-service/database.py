@@ -1,52 +1,26 @@
 import os
+import pathlib
+
 import psycopg2
+from alembic import command
+from alembic.config import Config
 from psycopg2.extras import RealDictCursor
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/pr_reviews")
+
+_SERVICE_DIR = pathlib.Path(__file__).parent
 
 
 def get_connection():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
-def init_db():
-    """创建表结构（如果不存在）"""
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS pr_reviews (
-                    id              SERIAL PRIMARY KEY,
-                    repo_full_name  TEXT NOT NULL,
-                    pr_number       INTEGER NOT NULL,
-                    head_sha        TEXT NOT NULL,
-                    ai_score        INTEGER,
-                    ai_approved     BOOLEAN,
-                    ai_summary      TEXT,
-                    ai_comment_posted    BOOLEAN DEFAULT FALSE,
-                    security_passed BOOLEAN,
-                    security_findings_count INTEGER,
-                    security_comment_posted BOOLEAN DEFAULT FALSE,
-                    created_at      TIMESTAMP DEFAULT NOW(),
-                    UNIQUE(repo_full_name, pr_number, head_sha)
-                );
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS security_findings (
-                    id        SERIAL PRIMARY KEY,
-                    review_id INTEGER REFERENCES pr_reviews(id) ON DELETE CASCADE,
-                    rule      TEXT NOT NULL,
-                    severity  TEXT NOT NULL,
-                    message   TEXT NOT NULL,
-                    line      INTEGER,
-                    content   TEXT
-                );
-            """)
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_pr_reviews_repo_pr
-                ON pr_reviews(repo_full_name, pr_number);
-            """)
-        conn.commit()
-    print("[DB] Tables initialized")
+def run_migrations():
+    """用 Alembic 把数据库 schema 收敛到当前代码期望的状态（幂等，对任意历史状态安全）"""
+    cfg = Config(str(_SERVICE_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_SERVICE_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    print("[DB] Migrations applied")
 
 
 def is_ai_comment_posted(repo_full_name: str, pr_number: int, head_sha: str) -> bool:
