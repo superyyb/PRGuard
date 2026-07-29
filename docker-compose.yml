@@ -38,7 +38,7 @@ services:
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic pr-events --partitions 5 --replication-factor 1
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic ai-results --partitions 5 --replication-factor 1
       kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic security-results --partitions 5 --replication-factor 1
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic pr-events-dlq --partitions 1 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic pr-events-dlq --partitions 1 --replication-factor 1 --config retention.ms=604800000
       echo 'Topics created.'
       "
 
@@ -139,6 +139,28 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml
+    depends_on:
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./prometheus/alertmanager.yml.tmpl:/etc/alertmanager/alertmanager.yml.tmpl:ro
+    environment:
+      GMAIL_USER: ${GMAIL_USER}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD}
+      NOTIFY_EMAIL: ${NOTIFY_EMAIL}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sed -e "s|__GMAIL_USER__|$$GMAIL_USER|g" \
+            -e "s|__GMAIL_APP_PASSWORD__|$$GMAIL_APP_PASSWORD|g" \
+            -e "s|__NOTIFY_EMAIL__|$$NOTIFY_EMAIL|g" \
+            /etc/alertmanager/alertmanager.yml.tmpl > /tmp/alertmanager.yml &&
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
 
   grafana:
     image: grafana/grafana:11.0.0

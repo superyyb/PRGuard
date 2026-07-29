@@ -36,6 +36,14 @@ data:
     global:
       scrape_interval: 15s
 
+    rule_files:
+      - alerts.yml
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ["alertmanager-service:9093"]
+
     scrape_configs:
       # Pod 级服务发现：不走 Service，直接命中每个 Pod IP，
       # 这样 KEDA 把 ai-review-worker 弹到多副本时每个副本都能被单独抓到
@@ -57,6 +65,27 @@ data:
             target_label: app
           - source_labels: [__meta_kubernetes_pod_name]
             target_label: pod
+  alerts.yml: |
+    groups:
+      - name: dlq
+        rules:
+          - alert: DLQPermanentFailureBurst
+            expr: increase(dlq_messages_total{error_type="PermanentFailure"}[10m]) > 3
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.service }} 短时间内出现多条永久失败消息"
+              description: "10分钟内 {{ $value }} 条 PermanentFailure，可能是事件 schema 变更或版本 skew"
+
+          - alert: DLQTemporaryFailureExhausted
+            expr: increase(dlq_messages_total{error_type="TemporaryFailure"}[5m]) > 0
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "{{ $labels.service }} 重试耗尽，疑似外部依赖故障"
+              description: "{{ $labels.service }} 有消息重试3次后仍失败，可能是 Claude/GitHub API 或 SMTP 出问题"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -96,6 +125,9 @@ spec:
             - name: config
               mountPath: /etc/prometheus/prometheus.yml
               subPath: prometheus.yml
+            - name: config
+              mountPath: /etc/prometheus/alerts.yml
+              subPath: alerts.yml
             - name: prometheus-data
               mountPath: /prometheus
           resources:
