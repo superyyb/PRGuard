@@ -1,0 +1,50 @@
+[
+  {
+    "name": "hardcoded_password",
+    "pattern": "(?i)(password|passwd|pwd)\\s*=\\s*[\"\\'][^\"\\']{4,}[\"\\']",
+    "severity": "high",
+    "message": "Hardcoded password detected"
+  },
+  {
+    "name": "hardcoded_secret",
+    "pattern": "(?i)(secret|api_key|apikey|token)\\s*=\\s*[\"\\'][^\"\\']{8,}[\"\\']",
+    "severity": "high",
+    "message": "Hardcoded secret or API key detected"
+  },
+  {
+    "name": "hardcoded_aws_key",
+    "pattern": "AKIA[0-9A-Z]{16}",
+    "severity": "high",
+    "message": "Hardcoded AWS access key detected"
+  },
+  {
+    "name": "sql_injection",
+    "pattern": "(?i)(execute|cursor\\.execute)\\s*\\(\\s*[\"\\'].*%s",
+    "severity": "high",
+    "message": "Potential SQL injection via string formatting"
+  },
+  {
+    "name": "eval_usage",
+    "pattern": "\\beval\\s*\\(",
+    "severity": "medium",
+    "message": "Use of eval() is dangerous"
+  },
+  {
+    "name": "shell_injection",
+    "pattern": "(?i)(os\\.system|subprocess\\.call|subprocess\\.Popen)\\s*\\(.*\\+",
+    "severity": "medium",
+    "message": "Potential shell injection via string concatenation"
+  },
+  {
+    "name": "debug_enabled",
+    "pattern": "(?i)DEBUG\\s*=\\s*True",
+    "severity": "low",
+    "message": "Debug mode enabled in code"
+  },
+  {
+    "name": "print_sensitive",
+    "pattern": "(?i)print\\s*\\(.*(?:password|token|secret)",
+    "severity": "low",
+    "message": "Potentially printing sensitive data"
+  }
+]

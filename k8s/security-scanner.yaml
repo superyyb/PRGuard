@@ -33,6 +33,11 @@ spec:
                   key: GITHUB_TOKEN
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://jaeger-service:4318"
+            - name: SECURITY_RULES_PATH
+              value: "/app/config/security-rules.json"
+          volumeMounts:
+            - name: security-rules
+              mountPath: /app/config
           livenessProbe:
             exec:
               # 检查 /tmp/healthy 在 120 秒内是否被更新过
@@ -58,3 +63,10 @@ spec:
             limits:
               cpu: "200m"
               memory: "256Mi"
+      volumes:
+        - name: security-rules
+          configMap:
+            name: prguard-config
+            items:
+              - key: security-rules.json
+                path: security-rules.json

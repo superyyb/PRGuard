@@ -98,17 +98,18 @@ consumer = Consumer({
 
 producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
 
-# 安全规则：(规则名, 正则, 严重级别, 说明)
-SECURITY_RULES = [
-    ("hardcoded_password", r'(?i)(password|passwd|pwd)\s*=\s*["\'][^"\']{4,}["\']', "high", "Hardcoded password detected"),
-    ("hardcoded_secret",   r'(?i)(secret|api_key|apikey|token)\s*=\s*["\'][^"\']{8,}["\']', "high", "Hardcoded secret or API key detected"),
-    ("hardcoded_aws_key",  r'AKIA[0-9A-Z]{16}', "high", "Hardcoded AWS access key detected"),
-    ("sql_injection",      r'(?i)(execute|cursor\.execute)\s*\(\s*["\'].*%s', "high", "Potential SQL injection via string formatting"),
-    ("eval_usage",         r'\beval\s*\(', "medium", "Use of eval() is dangerous"),
-    ("shell_injection",    r'(?i)(os\.system|subprocess\.call|subprocess\.Popen)\s*\(.*\+', "medium", "Potential shell injection via string concatenation"),
-    ("debug_enabled",      r'(?i)DEBUG\s*=\s*True', "low", "Debug mode enabled in code"),
-    ("print_sensitive",    r'(?i)print\s*\(.*(?:password|token|secret)', "low", "Potentially printing sensitive data"),
-]
+DEFAULT_RULES_PATH = os.path.join(os.path.dirname(__file__), "security_rules.json")
+SECURITY_RULES_PATH = os.getenv("SECURITY_RULES_PATH", DEFAULT_RULES_PATH)
+
+
+def load_security_rules(path: str) -> list[tuple]:
+    """从 JSON 文件加载安全规则：[(规则名, 正则, 严重级别, 说明), ...]"""
+    with open(path) as f:
+        rules = json.load(f)
+    return [(r["name"], r["pattern"], r["severity"], r["message"]) for r in rules]
+
+
+SECURITY_RULES = load_security_rules(SECURITY_RULES_PATH)
 
 
 def fetch_pr_diff(diff_url: str) -> str:
