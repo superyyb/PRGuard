@@ -125,7 +125,7 @@ async def github_webhook(
 
     producer.produce(
         "pr-events",
-        key=str(pr["number"]),
+        key=f"{event['repo_full_name']}:{pr['number']}",
         value=json.dumps(event),
         headers=inject_otel_headers([("trace_id", trace_id.encode())]),
         callback=delivery_report,
